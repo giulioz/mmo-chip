@@ -1,3 +1,5 @@
+import { checkRegion, dataPath, limits, safeId } from "../security.js";
+import { imageWork } from "../workQueue.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { Router } from "express";
@@ -16,6 +18,7 @@ export function createTilesRouter(config: {
   router.get("/api/dies/:dieId/cells/:cellId/crop", async (request, response, next) => {
     try {
       const { dieId, cellId } = request.params;
+      safeId(cellId);
       const record = await readDieRecord(config.dataRoot, dieId);
       const annotations = await readAnnotations(config.dataRoot, dieId);
 
@@ -42,10 +45,11 @@ export function createTilesRouter(config: {
       // Check cache. The key includes coords so re-aligning invalidates the old
       // cache; a footprint the shape of the type's box keeps the original key
       // (existing crops stay valid), a quarter-turned one adds its size.
-      const cacheDir = path.join(config.dataRoot, "dies", dieId, "cell-crops");
+      const cacheDir = dataPath(config.dataRoot, "dies", safeId(dieId), "cell-crops");
       const shape =
         fullW === Math.round(cropW) && fullH === Math.round(cropH) ? "" : `-${fullW}x${fullH}`;
       const cachePath = path.join(cacheDir, `${cellId}-${left}-${top}${shape}.jpg`);
+      dataPath(config.dataRoot, path.relative(config.dataRoot, cachePath));
       try {
         await fs.access(cachePath);
         response.sendFile(cachePath);
@@ -53,18 +57,17 @@ export function createTilesRouter(config: {
       } catch { /* cache miss */ }
 
       // Find original image
-      const originalDir = path.join(config.dataRoot, "dies", dieId, "original");
-      const files = await fs.readdir(originalDir);
-      if (files.length === 0) { response.status(404).json({ error: "Original image not found" }); return; }
-      const originalPath = path.join(originalDir, files[0]);
+      const originalPath = record.originalPath;
 
       if (width <= 0 || height <= 0) { response.status(400).json({ error: "Invalid crop region" }); return; }
 
+      checkRegion(width, height);
+      dataPath(config.dataRoot, path.relative(config.dataRoot, cachePath));
       await fs.mkdir(cacheDir, { recursive: true });
-      await sharp(originalPath, { limitInputPixels: false })
+      await imageWork(() => sharp(originalPath, { limitInputPixels: limits.imagePixels })
         .extract({ left, top, width, height })
         .jpeg({ quality: 90 })
-        .toFile(cachePath);
+        .toFile(cachePath));
 
       response.sendFile(cachePath);
     } catch (error) {
@@ -75,6 +78,7 @@ export function createTilesRouter(config: {
   router.get("/api/dies/:dieId/cell-types/:cellTypeId/crop", async (request, response, next) => {
     try {
       const { dieId, cellTypeId } = request.params;
+      safeId(cellTypeId);
       const record = await readDieRecord(config.dataRoot, dieId);
       const annotations = await readAnnotations(config.dataRoot, dieId);
 
@@ -91,18 +95,16 @@ export function createTilesRouter(config: {
       }
 
       // Check cache
-      const cacheDir = path.join(config.dataRoot, "dies", dieId, "cell-crops");
+      const cacheDir = dataPath(config.dataRoot, "dies", safeId(dieId), "cell-crops");
       const cachePath = path.join(cacheDir, `ct-${cellTypeId}.jpg`);
+      dataPath(config.dataRoot, path.relative(config.dataRoot, cachePath));
       try {
         await fs.access(cachePath);
         response.sendFile(cachePath);
         return;
       } catch { /* cache miss */ }
 
-      const originalDir = path.join(config.dataRoot, "dies", dieId, "original");
-      const files = await fs.readdir(originalDir);
-      if (files.length === 0) { response.status(404).json({ error: "Original image not found" }); return; }
-      const originalPath = path.join(originalDir, files[0]);
+      const originalPath = record.originalPath;
 
       const left = Math.max(0, Math.round(cropX));
       const top = Math.max(0, Math.round(cropY));
@@ -111,11 +113,13 @@ export function createTilesRouter(config: {
 
       if (width <= 0 || height <= 0) { response.status(400).json({ error: "Invalid crop region" }); return; }
 
+      checkRegion(width, height);
+      dataPath(config.dataRoot, path.relative(config.dataRoot, cachePath));
       await fs.mkdir(cacheDir, { recursive: true });
-      await sharp(originalPath, { limitInputPixels: false })
+      await imageWork(() => sharp(originalPath, { limitInputPixels: limits.imagePixels })
         .extract({ left, top, width, height })
         .jpeg({ quality: 90 })
-        .toFile(cachePath);
+        .toFile(cachePath));
 
       response.sendFile(cachePath);
     } catch (error) {
@@ -144,24 +148,24 @@ export function createTilesRouter(config: {
       const height = Math.min(h, record.height - top);
       if (width <= 0 || height <= 0) { response.status(400).json({ error: "Invalid crop region" }); return; }
 
-      const cacheDir = path.join(config.dataRoot, "dies", dieId, "cell-crops");
+      const cacheDir = dataPath(config.dataRoot, "dies", safeId(dieId), "cell-crops");
       const cachePath = path.join(cacheDir, `rect-${left}-${top}-${width}-${height}.jpg`);
+      dataPath(config.dataRoot, path.relative(config.dataRoot, cachePath));
       try {
         await fs.access(cachePath);
         response.sendFile(cachePath);
         return;
       } catch { /* cache miss */ }
 
-      const originalDir = path.join(config.dataRoot, "dies", dieId, "original");
-      const files = await fs.readdir(originalDir);
-      if (files.length === 0) { response.status(404).json({ error: "Original image not found" }); return; }
-      const originalPath = path.join(originalDir, files[0]);
+      const originalPath = record.originalPath;
 
+      checkRegion(width, height);
+      dataPath(config.dataRoot, path.relative(config.dataRoot, cachePath));
       await fs.mkdir(cacheDir, { recursive: true });
-      await sharp(originalPath, { limitInputPixels: false })
+      await imageWork(() => sharp(originalPath, { limitInputPixels: limits.imagePixels })
         .extract({ left, top, width, height })
         .jpeg({ quality: 90 })
-        .toFile(cachePath);
+        .toFile(cachePath));
       response.sendFile(cachePath);
     } catch (error) {
       next(error);

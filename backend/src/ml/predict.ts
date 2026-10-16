@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import { checkRegion, dataPath, DEV_TOKEN, limits, safeId } from "../security.js";
+import { mlWork } from "../workQueue.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
@@ -58,7 +61,8 @@ async function fetchSidecar(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    const headers = new Headers(init?.headers); headers.set("x-chiptool-token", DEV_TOKEN);
+    return await fetch(url, { ...init, headers, signal: controller.signal });
   } finally {
     clearTimeout(timer);
   }
@@ -148,123 +152,127 @@ export function createMLPredictor(config: {
     minDistance: number;
     wantHeatmap: boolean;
   }): Promise<RunPredictionResult> {
-    const [kx0, ky0, kx1, ky1] = params.keep;
-    const pad = config.mlPredictPad;
-    const px0 = Math.max(0, Math.floor(kx0 - pad));
-    const py0 = Math.max(0, Math.floor(ky0 - pad));
-    const px1 = Math.min(params.dieWidth, Math.ceil(kx1 + pad));
-    const py1 = Math.min(params.dieHeight, Math.ceil(ky1 + pad));
-    const cropW = px1 - px0;
-    const cropH = py1 - py0;
-    if (cropW <= 0 || cropH <= 0) {
-      return { pointVias: [], irregularVias: [], traces: [] };
-    }
-
-    const buf = await sharp(params.originalPath, { limitInputPixels: false })
-      .extract({ left: px0, top: py0, width: cropW, height: cropH })
-      .png()
-      .toBuffer();
-
-    const fd = new FormData();
-    fd.append(
-      "image",
-      new Blob([new Uint8Array(buf)], { type: "image/png" }),
-      "crop.png"
-    );
-    fd.append("threshold", String(params.threshold));
-    fd.append("min_distance", String(params.minDistance));
-    fd.append("return_heatmap", params.wantHeatmap ? "true" : "false");
-
-    let res: Response;
-    try {
-      res = await fetchSidecar(
-        `${config.mlSidecarUrl}/predict/region`,
-        PREDICT_TIMEOUT_MS,
-        { method: "POST", body: fd }
-      );
-    } catch {
-      throw new SidecarUnavailable("sidecar unreachable");
-    }
-    if (res.status === 503) {
-      throw new SidecarUnavailable("model not loaded or training");
-    }
-    if (!res.ok) throw new SidecarUnavailable(`sidecar /predict ${res.status}`);
-
-    const body = (await res.json()) as {
-      point_vias: { x: number; y: number; score: number }[];
-      irregular_vias: {
-        bbox: [number, number, number, number];
-        centroid: [number, number];
-        area: number;
-        score: number;
-      }[];
-      traces: { points?: number[][] }[] | number[][][];
-      heatmap_png_b64?: string;
-    };
-
-    const inKeep = (x: number, y: number) =>
-      x >= kx0 && x < kx1 && y >= ky0 && y < ky1;
-
-    const pointVias: MLVia[] = [];
-    for (const v of body.point_vias ?? []) {
-      const sx = v.x + px0;
-      const sy = v.y + py0;
-      if (inKeep(sx, sy)) pointVias.push({ x: sx, y: sy, score: v.score });
-    }
-
-    const irregularVias: MLRegion[] = [];
-    for (const r of body.irregular_vias ?? []) {
-      const cx = r.centroid[0] + px0;
-      const cy = r.centroid[1] + py0;
-      if (!inKeep(cx, cy)) continue; // dedupe at tile seams by centroid
-      irregularVias.push({
-        bbox: [r.bbox[0] + px0, r.bbox[1] + py0, r.bbox[2], r.bbox[3]],
-        centroid: [cx, cy],
-        area: r.area,
-        score: r.score
-      });
-    }
-
-    const traces: MLTracePolyline[] = [];
-    for (const t of (body.traces ?? []) as unknown[]) {
-      const raw = Array.isArray(t)
-        ? (t as number[][])
-        : ((t as { points?: number[][] }).points ?? []);
-      if (raw.length < 2) continue;
-      const pts = raw.map(([x, y]) => [x + px0, y + py0] as [number, number]);
-      let minx = Infinity;
-      let miny = Infinity;
-      let maxx = -Infinity;
-      let maxy = -Infinity;
-      for (const [x, y] of pts) {
-        if (x < minx) minx = x;
-        if (y < miny) miny = y;
-        if (x > maxx) maxx = x;
-        if (y > maxy) maxy = y;
+    return mlWork(async () => {
+      const [kx0, ky0, kx1, ky1] = params.keep;
+      const pad = config.mlPredictPad;
+      const px0 = Math.max(0, Math.floor(kx0 - pad));
+      const py0 = Math.max(0, Math.floor(ky0 - pad));
+      const px1 = Math.min(params.dieWidth, Math.ceil(kx1 + pad));
+      const py1 = Math.min(params.dieHeight, Math.ceil(ky1 + pad));
+      const cropW = px1 - px0;
+      const cropH = py1 - py0;
+      if (cropW <= 0 || cropH <= 0) {
+        return { pointVias: [], irregularVias: [], traces: [] };
       }
-      const overlaps = !(maxx <= kx0 || minx >= kx1 || maxy <= ky0 || miny >= ky1);
-      if (overlaps) traces.push({ points: pts });
-    }
 
-    let heatmapTilePng: Buffer | undefined;
-    if (params.wantHeatmap && body.heatmap_png_b64) {
-      const full = Buffer.from(body.heatmap_png_b64, "base64");
-      heatmapTilePng = await sharp(full)
-        .extract({
-          left: kx0 - px0,
-          top: ky0 - py0,
-          width: kx1 - kx0,
-          height: ky1 - ky0
-        })
+      checkRegion(cropW, cropH);
+      dataPath(config.dataRoot, path.relative(path.resolve(config.dataRoot), params.originalPath));
+      const buf = await sharp(params.originalPath, { limitInputPixels: limits.imagePixels })
+        .extract({ left: px0, top: py0, width: cropW, height: cropH })
         .png()
         .toBuffer();
-    }
 
-    return { pointVias, irregularVias, traces, heatmapTilePng };
+      const fd = new FormData();
+      fd.append(
+        "image",
+        new Blob([new Uint8Array(buf)], { type: "image/png" }),
+        "crop.png"
+      );
+      fd.append("threshold", String(params.threshold));
+      fd.append("min_distance", String(params.minDistance));
+      fd.append("return_heatmap", params.wantHeatmap ? "true" : "false");
+
+      let res: Response;
+      try {
+        res = await fetchSidecar(
+          `${config.mlSidecarUrl}/predict/region`,
+          PREDICT_TIMEOUT_MS,
+          { method: "POST", body: fd }
+        );
+      } catch {
+        throw new SidecarUnavailable("sidecar unreachable");
+      }
+      if (res.status === 503) {
+        throw new SidecarUnavailable("model not loaded or training");
+      }
+      if (!res.ok) throw new SidecarUnavailable(`sidecar /predict ${res.status}`);
+
+      const body = (await res.json()) as {
+        point_vias: { x: number; y: number; score: number }[];
+        irregular_vias: {
+          bbox: [number, number, number, number];
+          centroid: [number, number];
+          area: number;
+          score: number;
+        }[];
+        traces: { points?: number[][] }[] | number[][][];
+        heatmap_png_b64?: string;
+      };
+
+      const inKeep = (x: number, y: number) =>
+        x >= kx0 && x < kx1 && y >= ky0 && y < ky1;
+
+      const pointVias: MLVia[] = [];
+      for (const v of body.point_vias ?? []) {
+        const sx = v.x + px0;
+        const sy = v.y + py0;
+        if (inKeep(sx, sy)) pointVias.push({ x: sx, y: sy, score: v.score });
+      }
+
+      const irregularVias: MLRegion[] = [];
+      for (const r of body.irregular_vias ?? []) {
+        const cx = r.centroid[0] + px0;
+        const cy = r.centroid[1] + py0;
+        if (!inKeep(cx, cy)) continue; // dedupe at tile seams by centroid
+        irregularVias.push({
+          bbox: [r.bbox[0] + px0, r.bbox[1] + py0, r.bbox[2], r.bbox[3]],
+          centroid: [cx, cy],
+          area: r.area,
+          score: r.score
+        });
+      }
+
+      const traces: MLTracePolyline[] = [];
+      for (const t of (body.traces ?? []) as unknown[]) {
+        const raw = Array.isArray(t)
+          ? (t as number[][])
+          : ((t as { points?: number[][] }).points ?? []);
+        if (raw.length < 2) continue;
+        const pts = raw.map(([x, y]) => [x + px0, y + py0] as [number, number]);
+        let minx = Infinity;
+        let miny = Infinity;
+        let maxx = -Infinity;
+        let maxy = -Infinity;
+        for (const [x, y] of pts) {
+          if (x < minx) minx = x;
+          if (y < miny) miny = y;
+          if (x > maxx) maxx = x;
+          if (y > maxy) maxy = y;
+        }
+        const overlaps = !(maxx <= kx0 || minx >= kx1 || maxy <= ky0 || miny >= ky1);
+        if (overlaps) traces.push({ points: pts });
+      }
+
+      let heatmapTilePng: Buffer | undefined;
+      if (params.wantHeatmap && body.heatmap_png_b64) {
+        const full = Buffer.from(body.heatmap_png_b64, "base64");
+        heatmapTilePng = await sharp(full)
+          .extract({
+            left: kx0 - px0,
+            top: ky0 - py0,
+            width: kx1 - kx0,
+            height: ky1 - ky0
+          })
+          .png()
+          .toBuffer();
+      }
+
+      return { pointVias, irregularVias, traces, heatmapTilePng };
+    });
   }
 
   function cacheDirFor(dieId: string, hash: string | null): string {
-    return path.join(config.dataRoot, "predictions", dieId, hash ?? "nohash");
+    return dataPath(config.dataRoot, "predictions", safeId(dieId), hash == null ? "nohash" : safeId(hash));
   }
 
   function tileCachePath(
@@ -274,15 +282,16 @@ export function createMLPredictor(config: {
     tx: number,
     ty: number
   ): string {
-    return path.join(cacheDirFor(dieId, hash), `${z}_${tx}_${ty}.json`);
+    return dataPath(config.dataRoot, "predictions", safeId(dieId), hash == null ? "nohash" : safeId(hash), `${z}_${tx}_${ty}.json`);
   }
 
   async function atomicWrite(
     filePath: string,
     data: Buffer | string
   ): Promise<void> {
+    dataPath(config.dataRoot, path.relative(path.resolve(config.dataRoot), filePath));
     await fs.mkdir(path.dirname(filePath), { recursive: true });
-    const tmp = `${filePath}.${process.pid}.tmp`;
+    const tmp = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
     await fs.writeFile(tmp, data);
     await fs.rename(tmp, filePath);
   }
@@ -356,6 +365,7 @@ export function createMLPredictor(config: {
   }
 
   function clearMemCache(): void {
+    hashCache = null;
     memCache.clear();
   }
 

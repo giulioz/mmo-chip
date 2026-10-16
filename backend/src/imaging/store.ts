@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { dataPath, safeId } from "../security.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { CellSpecimenIndex, WireMapInfo } from "shared";
@@ -8,24 +10,24 @@ import type { CellSpecimenIndex, WireMapInfo } from "shared";
  * never touch `annotations.json`.
  */
 export const specimensDir = (dataRoot: string, dieId: string) =>
-  path.join(dataRoot, "dies", dieId, "cell-specimens");
+  dataPath(dataRoot, "dies", safeId(dieId), "cell-specimens");
 export const wireMapDir = (dataRoot: string, dieId: string) =>
-  path.join(dataRoot, "dies", dieId, "wire-map");
+  dataPath(dataRoot, "dies", safeId(dieId), "wire-map");
 
 export const specimenPath = (dataRoot: string, dieId: string, cellTypeId: string) =>
-  path.join(specimensDir(dataRoot, dieId), `${cellTypeId}.png`);
+  dataPath(dataRoot, "dies", safeId(dieId), "cell-specimens", `${safeId(cellTypeId)}.png`);
 /** High-resolution display rendering (sharpest instances, affine-registered,
  *  reconstructed at DISPLAY_SCALE× and sharpened). The plain specimen above
  *  stays the measurement reference for the wire map. */
 export const specimenDisplayPath = (dataRoot: string, dieId: string, cellTypeId: string) =>
-  path.join(specimensDir(dataRoot, dieId), `${cellTypeId}@2x.png`);
+  dataPath(dataRoot, "dies", safeId(dieId), "cell-specimens", `${safeId(cellTypeId)}@2x.png`);
 /** Per-pixel MAD ×SPREAD_SCALE, clipped to 8 bits. */
 export const spreadPath = (dataRoot: string, dieId: string, cellTypeId: string) =>
-  path.join(specimensDir(dataRoot, dieId), `${cellTypeId}.spread.png`);
+  dataPath(dataRoot, "dies", safeId(dieId), "cell-specimens", `${safeId(cellTypeId)}.spread.png`);
 export const SPREAD_SCALE = 4;
 
 export const wireTilePath = (dataRoot: string, dieId: string, z: number, x: number, y: number) =>
-  path.join(wireMapDir(dataRoot, dieId), String(z), `${x}_${y}.png`);
+  dataPath(dataRoot, "dies", safeId(dieId), "wire-map", String(z), `${x}_${y}.png`);
 
 async function readJson<T>(file: string): Promise<T | null> {
   try {
@@ -38,19 +40,19 @@ async function readJson<T>(file: string): Promise<T | null> {
 
 async function writeJsonAtomic(file: string, value: unknown): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
+  const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(value, null, 2), "utf8");
   await fs.rename(tmp, file);
 }
 
 export const readSpecimenIndex = (dataRoot: string, dieId: string) =>
-  readJson<CellSpecimenIndex>(path.join(specimensDir(dataRoot, dieId), "index.json"));
+  readJson<CellSpecimenIndex>(dataPath(dataRoot, "dies", safeId(dieId), "cell-specimens", "index.json"));
 export const writeSpecimenIndex = (dataRoot: string, index: CellSpecimenIndex) =>
-  writeJsonAtomic(path.join(specimensDir(dataRoot, index.dieId), "index.json"), index);
+  writeJsonAtomic(dataPath(dataRoot, "dies", safeId(index.dieId), "cell-specimens", "index.json"), index);
 export const readWireMapInfo = (dataRoot: string, dieId: string) =>
-  readJson<WireMapInfo>(path.join(wireMapDir(dataRoot, dieId), "info.json"));
+  readJson<WireMapInfo>(dataPath(dataRoot, "dies", safeId(dieId), "wire-map", "info.json"));
 export const writeWireMapInfo = (dataRoot: string, info: WireMapInfo) =>
-  writeJsonAtomic(path.join(wireMapDir(dataRoot, info.dieId), "info.json"), info);
+  writeJsonAtomic(dataPath(dataRoot, "dies", safeId(info.dieId), "wire-map", "info.json"), info);
 
 export const clearSpecimens = (dataRoot: string, dieId: string) =>
   fs.rm(specimensDir(dataRoot, dieId), { recursive: true, force: true });

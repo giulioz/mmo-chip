@@ -17,7 +17,7 @@ async function main() {
   const broadcaster = attachWebSocketBroadcaster(httpServer);
   const app = createApp({ ...config, broadcaster });
   httpServer.on("request", app);
-  httpServer.listen(config.port, () => {
+  httpServer.listen(config.port, process.env.CHIPTOOL_HOST ?? "127.0.0.1", () => {
     console.log(`chiptool backend listening on http://localhost:${config.port}`);
   });
 }

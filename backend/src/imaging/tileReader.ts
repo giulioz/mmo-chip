@@ -1,3 +1,4 @@
+import { checkRegion } from "../security.js";
 import sharp from "sharp";
 import type { createTileScheduler } from "../tileScheduler.js";
 import type { DieRecord } from "../types.js";
@@ -45,6 +46,7 @@ export function createTileReader(record: DieRecord, scheduler: TileScheduler, ma
   /** RGB bytes for the box, or null when it isn't fully inside the die. */
   async function region(x0: number, y0: number, w: number, h: number): Promise<Region | null> {
     if (x0 < 0 || y0 < 0 || w <= 0 || h <= 0 || x0 + w > record.width || y0 + h > record.height) return null;
+    checkRegion(w, h);
     const out = new Uint8Array(w * h * 3);
     for (let ty = Math.floor(y0 / ts); ty <= Math.floor((y0 + h - 1) / ts); ty++) {
       for (let tx = Math.floor(x0 / ts); tx <= Math.floor((x0 + w - 1) / ts); tx++) {

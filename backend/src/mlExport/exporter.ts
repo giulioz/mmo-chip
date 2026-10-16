@@ -1,3 +1,4 @@
+import { checkRegion, dataPath, limits } from "../security.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
@@ -75,7 +76,7 @@ export async function runMLExport(params: {
   }
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const exportDirAbs = path.join(dataRoot, ML_EXPORTS_SUBDIR, `${record.name}-${timestamp}`);
+  const exportDirAbs = dataPath(dataRoot, ML_EXPORTS_SUBDIR, `${record.id}-${timestamp}`);
   await fs.mkdir(exportDirAbs, { recursive: true });
 
   log(`[ml-export] ${dieId} → ${exportDirAbs} (${rois.length} ROIs, ${netSegments.length} net segments)`);
@@ -97,7 +98,8 @@ export async function runMLExport(params: {
     const jpgPath = path.join(exportDirAbs, `roi_${i + 1}.jpg`);
     const jsonPath = path.join(exportDirAbs, `roi_${i + 1}.json`);
 
-    await sharp(record.originalPath, { limitInputPixels: false, sequentialRead: true })
+    checkRegion(cropWidth, cropHeight);
+    await sharp(record.originalPath, { limitInputPixels: limits.imagePixels, sequentialRead: true })
       .extract({ left: x0, top: y0, width: cropWidth, height: cropHeight })
       .resize({
         width: ML_EXPORT_RESOLUTION,

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import sharp from "sharp";
 import type {
@@ -51,7 +52,7 @@ export interface CellImagingJobManager {
 const yieldToLoop = () => new Promise<void>((r) => setImmediate(r));
 
 async function writeAtomic(file: string, png: Buffer): Promise<void> {
-  const tmp = `${file}.${process.pid}.tmp`;
+  const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
   await fs.writeFile(tmp, png);
   await fs.rename(tmp, file);
 }

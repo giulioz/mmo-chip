@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test, { afterEach } from "node:test";
 import express from "express";
-import request from "supertest";
+import request from "../testRequest.test.js";
 import type { MLInferenceJob } from "shared";
 import { createMLRouter } from "../api/ml.js";
 import { ensureDataStore, writeDieRecord } from "../store.js";
@@ -32,7 +32,7 @@ async function writeDie(root: string): Promise<DieRecord> {
     id: "die1",
     name: "die1",
     originalFilename: "die1.png",
-    originalPath: path.join(root, "nope.png"),
+    originalPath: path.join(root, "dies", "die1", "original", "nope.png"),
     width: 256,
     height: 256,
     tileSize: 128,

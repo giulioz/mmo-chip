@@ -1,3 +1,4 @@
+import { checkImage, dataPath, limits, safeId } from "../security.js";
 import crypto from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -35,13 +36,14 @@ export async function importDieShot(params: {
   }
 
   const metadata = await sharp(params.filePath, {
-    limitInputPixels: params.limitInputPixels,
+    limitInputPixels: params.limitInputPixels === false ? limits.imagePixels : Math.min(params.limitInputPixels, limits.imagePixels),
     sequentialRead: true
   }).metadata();
   if (!metadata.width || !metadata.height) {
     throw new Error("Failed to read image dimensions.");
   }
 
+  checkImage(metadata.width, metadata.height, params.limitInputPixels === false ? limits.imagePixels : Math.min(params.limitInputPixels, limits.imagePixels));
   params.logger?.(`analyzed ${params.originalFilename} at ${metadata.width}x${metadata.height}`);
 
   const id = crypto.randomUUID();
@@ -165,10 +167,10 @@ export async function ensureTileForRecord(params: {
     throw new Error("Tile coordinates out of range.");
   }
 
-  const tilePath = path.join(
+  const tilePath = dataPath(
     params.dataRoot,
     "dies",
-    params.record.id,
+    safeId(params.record.id),
     "tiles",
     String(params.z),
     `${params.x}_${params.y}.jpg`
@@ -197,7 +199,7 @@ export async function ensureTileForRecord(params: {
 
   await pipelineToFileAtomic(
     sharp(params.record.originalPath, {
-      limitInputPixels: false,
+      limitInputPixels: limits.imagePixels,
       sequentialRead: true
     })
       .extract({

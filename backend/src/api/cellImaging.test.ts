@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test, { afterEach } from "node:test";
 import sharp from "sharp";
-import request from "supertest";
+import request from "../testRequest.test.js";
 import type { CellImagingJob, CellSpecimenIndex, DieAnnotations, WireMapInfo } from "shared";
 import { createApp } from "../app.js";
 import { ensureDataStore } from "../store.js";

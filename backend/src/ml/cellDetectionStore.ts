@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { dataPath, safeId } from "../security.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { CellDetectionResult } from "shared";
@@ -10,11 +12,11 @@ import type { CellDetectionResult } from "shared";
  */
 
 export function cellDetectionsDir(dataRoot: string, dieId: string): string {
-  return path.join(dataRoot, "dies", dieId, "cell-detections");
+  return dataPath(dataRoot, "dies", safeId(dieId), "cell-detections");
 }
 
 function fileFor(dataRoot: string, dieId: string, cellTypeId: string): string {
-  return path.join(cellDetectionsDir(dataRoot, dieId), `${cellTypeId}.json`);
+  return dataPath(dataRoot, "dies", safeId(dieId), "cell-detections", `${safeId(cellTypeId)}.json`);
 }
 
 export async function readCellDetection(
@@ -48,7 +50,7 @@ export async function listCellDetections(
       .filter((f) => f.endsWith(".json"))
       .map(async (f) => {
         try {
-          return JSON.parse(await fs.readFile(path.join(dir, f), "utf8")) as CellDetectionResult;
+          return JSON.parse(await fs.readFile(dataPath(dataRoot, "dies", safeId(dieId), "cell-detections", f), "utf8")) as CellDetectionResult;
         } catch {
           return null; // a half-written / corrupt file shouldn't sink the list
         }
@@ -65,7 +67,7 @@ export async function writeCellDetection(
 ): Promise<void> {
   const file = fileFor(dataRoot, result.dieId, result.cellTypeId);
   await fs.mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
+  const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(result), "utf8");
   await fs.rename(tmp, file);
 }

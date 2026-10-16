@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0",
+    "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "node --import tsx --test src/lib/mergeCells.test.ts src/lib/viaAlign.test.ts src/lib/cellLayers.test.ts src/state/cellRE.test.ts src/renderer/dieRegion.test.ts src/api/actions.test.ts src/lib/cellLibrary.test.ts"

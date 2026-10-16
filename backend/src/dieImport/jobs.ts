@@ -1,3 +1,5 @@
+import { dataPath, HttpError } from "../security.js";
+import { importWork } from "../workQueue.js";
 import crypto from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
@@ -17,52 +19,57 @@ export function createImportJobManager(config: {
   tileScheduler: ReturnType<typeof createTileScheduler>;
 }) {
   const activeJobs = new Set<string>();
+  let admittedImports = 0;
 
   async function enqueueImportJob(file: Express.Multer.File) {
-    const jobId = crypto.randomUUID();
-    const jobDirectory = path.join(config.dataRoot, "jobs", jobId);
-    await fs.mkdir(jobDirectory, { recursive: true });
+    if (admittedImports >= 5) throw new HttpError(429, "Import queue is full; retry later");
+    admittedImports++;
+    try {
+      const jobId = crypto.randomUUID();
+      const jobDirectory = dataPath(config.dataRoot, "jobs", jobId);
+      await fs.mkdir(jobDirectory, { recursive: true });
 
-    const extension =
-      path.extname(file.originalname) || extensionForMimeType(file.mimetype) || ".bin";
-    const inputFilePath = path.join(jobDirectory, `upload${extension}`);
-    await fs.copyFile(file.path, inputFilePath);
+      const extension =
+        path.extname(file.originalname) || extensionForMimeType(file.mimetype) || ".bin";
+      const inputFilePath = path.join(jobDirectory, `upload${extension}`);
+      await fs.copyFile(file.path, inputFilePath);
 
-    const timestamp = new Date().toISOString();
-    const job: ImportJobRecord = {
-      id: jobId,
-      type: "import-die",
-      status: "queued",
-      originalFilename: file.originalname,
-      mimeType: file.mimetype,
-      inputFilePath,
-      dieId: null,
-      error: null,
-      createdAt: timestamp,
-      updatedAt: timestamp,
-      startedAt: null,
-      finishedAt: null,
-      progress: createProgress({
-        phase: "queued",
-        message: "Queued for import",
-        totalLevels: 0,
-        completedLevels: 0,
-        currentLevel: null,
-        currentLevelTiles: 0,
-        currentLevelProcessedTiles: 0,
-        totalTiles: 0,
-        processedTiles: 0
-      })
-    };
+      const timestamp = new Date().toISOString();
+      const job: ImportJobRecord = {
+        id: jobId,
+        type: "import-die",
+        status: "queued",
+        originalFilename: file.originalname,
+        mimeType: file.mimetype,
+        inputFilePath,
+        dieId: null,
+        error: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        startedAt: null,
+        finishedAt: null,
+        progress: createProgress({
+          phase: "queued",
+          message: "Queued for import",
+          totalLevels: 0,
+          completedLevels: 0,
+          currentLevel: null,
+          currentLevelTiles: 0,
+          currentLevelProcessedTiles: 0,
+          totalTiles: 0,
+          processedTiles: 0
+        })
+      };
 
-    await writeImportJob(config.dataRoot, job);
-    console.log(`[import:${jobId}] queued ${file.originalname}`);
+      await writeImportJob(config.dataRoot, job);
+      console.log(`[import:${jobId}] queued ${file.originalname}`);
 
-    setImmediate(() => {
-      void runImportJob(jobId);
-    });
+      setImmediate(() => {
+        void importWork(() => runImportJob(jobId)).catch(error => console.error("Import admission failed", error)).finally(() => { admittedImports--; });
+      });
 
-    return job;
+      return job;
+    } catch (error) { admittedImports--; throw error; }
   }
 
   async function runImportJob(jobId: string) {
@@ -183,6 +190,7 @@ export function createImportJobManager(config: {
       await writeImportJob(config.dataRoot, job);
       console.error(`[import:${jobId}] failed: ${job.error}`);
     } finally {
+      await fs.rm(job.inputFilePath, { force: true });
       activeJobs.delete(jobId);
     }
   }

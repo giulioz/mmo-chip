@@ -1,4 +1,4 @@
-import cors from "cors";
+import { HttpError, requireAccess } from "./security.js";
 import express from "express";
 import { createImportJobManager } from "./dieImport/jobs.js";
 import { createAnnotationsRouter } from "./api/annotations.js";
@@ -44,7 +44,15 @@ export function createApp(config: {
       console.error("Failed to resume background tile generation", error);
     });
 
-  app.use(cors() as unknown as express.RequestHandler);
+  app.use(requireAccess());
+  app.use((request, response, next) => {
+    const segments = request.path.split("/");
+    // Reject encoded separators before child routers resolve URL parameters.
+    try { for (const segment of segments) {
+      const decoded = decodeURIComponent(segment);
+      if (decoded.includes("/") || decoded.includes("\\") || decoded === "." || decoded === ".." || decoded.includes("\0")) throw new HttpError(400, "Invalid path segment");
+    } next(); } catch (error) { next(error instanceof URIError ? new HttpError(400, "Invalid URL encoding") : error); }
+  });
   app.use(express.json({ limit: "50mb" }));
 
   app.use(createHealthRouter());
@@ -100,6 +108,10 @@ export function createApp(config: {
       response: express.Response,
       _next: express.NextFunction
     ) => {
+      if ((error as { type?: string }).type === "entity.too.large") { response.status(413).json({ error: "JSON body exceeds size limit" }); return; }
+      if (error instanceof HttpError) { response.status(error.status).json({ error: error.message }); return; }
+      if ((error as { code?: string }).code === "LIMIT_FILE_SIZE") { response.status(413).json({ error: "Upload exceeds size limit" }); return; }
+      if (typeof (error as { code?: unknown }).code === "string" && String((error as { code?: string }).code).startsWith("LIMIT_")) { response.status(400).json({ error: "Invalid multipart upload" }); return; }
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         response.status(404).json({ error: "Not found" });
         return;

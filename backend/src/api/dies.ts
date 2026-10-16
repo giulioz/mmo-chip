@@ -1,3 +1,4 @@
+import { dataPath, limits } from "../security.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { Router } from "express";
@@ -31,8 +32,8 @@ export function createDiesRouter(config: {
   broadcaster?: AnnotationBroadcaster;
 }) {
   const router = Router();
-  const uploadDirectory = path.join(config.dataRoot, "tmp");
-  const upload = multer({ dest: uploadDirectory });
+  const uploadDirectory = dataPath(config.dataRoot, "tmp");
+  const upload = multer({ dest: uploadDirectory, limits: { fileSize: limits.uploadBytes, files: 1, fields: 8, parts: 9, fieldSize: 4096 } });
 
   router.get("/api/dies", async (_request, response, next) => {
     try {
@@ -87,16 +88,25 @@ export function createDiesRouter(config: {
   router.delete("/api/dies/:dieId", async (request, response, next) => {
     try {
       const record = await readDieRecord(config.dataRoot, request.params.dieId);
-      await config.tileScheduler.removeDie(record.id);
-      await deleteDieRecord(config.dataRoot, record.id);
-      await deleteImportJobsForDie(config.dataRoot, record.id);
+      await config.tileScheduler.removeDie(request.params.dieId);
+      await deleteDieRecord(config.dataRoot, request.params.dieId);
+      await deleteImportJobsForDie(config.dataRoot, request.params.dieId);
       response.json({ ok: true });
     } catch (error) {
       next(error);
     }
   });
 
-  router.post("/api/dies/import", upload.single("file"), async (request, response, next) => {
+  let uploads = 0;
+  const uploadAdmission: import("express").RequestHandler = (_request, response, next) => {
+    if (uploads >= 2) { response.status(429).json({ error: "Upload slots are busy; retry later" }); return; }
+    uploads++;
+    let released = false;
+    const release = () => { if (!released) { uploads--; released = true; } };
+    response.once("finish", release); response.once("close", release);
+    next();
+  };
+  router.post("/api/dies/import", uploadAdmission, upload.single("file"), async (request, response, next) => {
     if (!request.file) {
       response.status(400).send("Expected one uploaded file.");
       return;

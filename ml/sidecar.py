@@ -14,6 +14,8 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import io
+import re
 import math
 import os
 import threading
@@ -27,7 +29,10 @@ import numpy as np
 import torch
 import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing import Literal
+from PIL import Image
+from security import confined_path, LocalAccessMiddleware, MAX_BODY_BYTES, MAX_REGION_PIXELS, MAX_REGION_DIMENSION
 
 from augment import normalize_only
 from heatmap import extract_components, extract_peaks, extract_trace_polylines
@@ -81,14 +86,10 @@ class ModelState:
     # train) acquire this so concurrent tile requests don't race the device.
     lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def load(self, checkpoint_path: Path) -> None:
-        if not checkpoint_path.exists():
-            self.checkpoint_path = checkpoint_path
-            self.model = None
-            self.model_loaded = False
-            self.checkpoint_hash = None
-            print(f"[sidecar] no checkpoint at {checkpoint_path} — running unloaded")
-            return
+    def load(self, checkpoint_path: Path) -> bool:
+        if not checkpoint_path.is_file():
+            print("[sidecar] checkpoint unavailable — preserving resident model")
+            return False
         try:
             ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
             encoder = ckpt.get("encoder", "resnet18")
@@ -97,21 +98,19 @@ class ModelState:
                                 classes=n_classes).to(self.device)
             model.load_state_dict(ckpt["model_state"])
             model.eval()
-        except Exception as exc:  # noqa: BLE001 — degrade gracefully, never crash boot
-            self.model = None
-            self.model_loaded = False
-            self.checkpoint_path = checkpoint_path
-            self.checkpoint_hash = None
-            print(f"[sidecar] failed to load {checkpoint_path}: {exc} — running unloaded")
-            return
+            digest = checkpoint_hash(checkpoint_path)
+        except Exception as exc:  # Invalid reloads must leave the resident model intact.
+            print(f"[sidecar] failed to load checkpoint: {exc}")
+            return False
         self.model = model
         self.encoder = encoder
         self.num_classes = n_classes
         self.checkpoint_path = checkpoint_path
-        self.checkpoint_hash = checkpoint_hash(checkpoint_path)
+        self.checkpoint_hash = digest
         self.model_loaded = True
         print(f"[sidecar] loaded {checkpoint_path} ({encoder}, {n_classes} classes) "
               f"hash={self.checkpoint_hash} device={self.device}")
+        return True
 
 
 STATE = ModelState()
@@ -125,9 +124,10 @@ RESIDENT_FILE = ML_DIR / "checkpoints" / ".resident"
 
 def remember_resident(path: Path) -> None:
     try:
+        confined_path(ML_DIR, RESIDENT_FILE)
         RESIDENT_FILE.parent.mkdir(parents=True, exist_ok=True)
         RESIDENT_FILE.write_text(str(path.resolve()) + "\n", encoding="utf-8")
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         print(f"[sidecar] could not record resident checkpoint: {exc}")
 
 
@@ -137,7 +137,10 @@ def recall_resident() -> Path | None:
     except OSError:
         return None
     p = Path(raw)
-    return p if raw and p.exists() else None
+    try:
+        return checked_checkpoint(p.name) if raw and p.parent.resolve() == (ML_DIR / "checkpoints").resolve() else None
+    except (ValueError, OSError):
+        return None
 
 
 @dataclass
@@ -177,14 +180,20 @@ JOBS_LOCK = threading.Lock()
 
 
 class TrainBody(BaseModel):
-    data_dir: str
-    epochs: int = 50  # snappier than the CLI default (200) for the retrain loop
-    encoder: str = "resnet18"
-    lr: float = 1e-3
-    crop_size: int = 256
-    steps_per_epoch: int = 100
-    batch_size: int = 8
-    output: str | None = None  # defaults to the resident checkpoint path
+    model_config = ConfigDict(extra="forbid")
+    data_dir: str = Field(min_length=1, max_length=512)
+    epochs: int = Field(default=50, ge=1, le=200, strict=True)
+    encoder: Literal["resnet18", "resnet34"] = "resnet18"
+    lr: float = Field(default=1e-3, ge=1e-6, le=0.1, allow_inf_nan=False)
+    crop_size: int = Field(default=256, ge=32, le=512, multiple_of=32, strict=True)
+    steps_per_epoch: int = Field(default=100, ge=1, le=1000, strict=True)
+    batch_size: int = Field(default=8, ge=1, le=16, strict=True)
+
+    @model_validator(mode="after")
+    def finite_work(self):
+        if self.epochs * self.steps_per_epoch * self.batch_size > 1_000_000:
+            raise ValueError("Training workload exceeds limit")
+        return self
 
 
 class ReloadBody(BaseModel):
@@ -192,6 +201,8 @@ class ReloadBody(BaseModel):
 
 
 app = FastAPI(title="chiptool-ml-sidecar")
+app.add_middleware(LocalAccessMiddleware)
+PREDICTION_SLOT = threading.BoundedSemaphore(1)
 
 
 @app.get("/health")
@@ -211,64 +222,82 @@ def health() -> dict:
 @app.post("/predict/region")
 def predict_region(
     image: UploadFile = File(...),
-    threshold: float = Form(0.5),
-    min_distance: int = Form(4),
+    threshold: float = Form(0.5, ge=0, le=1),
+    min_distance: int = Form(4, ge=1, le=256),
     return_heatmap: bool = Form(False),
 ) -> dict:
     """Stateless: decode the posted crop, run the U-Net, return peaks in
     *crop-local* pixel coords. Node owns the source-coord translation,
     tile math, padding, filtering and caching. Sync endpoint so FastAPI
     runs it in a worker thread; STATE.lock serializes the single device."""
-    if not STATE.model_loaded or STATE.model is None:
-        raise HTTPException(status_code=503, detail="model not loaded")
-    if STATE.training_active:
-        raise HTTPException(status_code=503, detail="training")
+    if not PREDICTION_SLOT.acquire(blocking=False):
+        raise HTTPException(status_code=429, detail="Inference is busy; retry later")
+    try:
+        if not STATE.model_loaded or STATE.model is None:
+            raise HTTPException(status_code=503, detail="model not loaded")
+        if STATE.training_active:
+            raise HTTPException(status_code=503, detail="training")
 
-    raw = image.file.read()
-    arr = np.frombuffer(raw, dtype=np.uint8)
-    bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if bgr is None:
-        raise HTTPException(status_code=400, detail="could not decode image")
-    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    h, w = rgb.shape[:2]
+        raw = image.file.read(MAX_BODY_BYTES + 1)
+        if len(raw) > MAX_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="Image upload exceeds limit")
+        try:
+            with Image.open(io.BytesIO(raw)) as header:
+                w, h = header.size
+                if w > MAX_REGION_DIMENSION or h > MAX_REGION_DIMENSION or w * h > MAX_REGION_PIXELS:
+                    raise HTTPException(status_code=413, detail="Image region exceeds limit")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid image")
+        arr = np.frombuffer(raw, dtype=np.uint8)
+        bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise HTTPException(status_code=400, detail="could not decode image")
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        h, w = rgb.shape[:2]
 
-    with STATE.lock:
-        maps = tile_predict(
-            STATE.model, rgb,
-            tile_size=512, overlap=64,
-            device=STATE.device, batch_size=4,
-            normalize=_normalize,
-        )  # (C, H, W) — C=1 (old vias-only model) or C=3 (multi-class)
-    n_ch = maps.shape[0]
-    ch0 = maps[0]
-    ch1 = maps[1] if n_ch >= 2 else None
-    ch2 = maps[2] if n_ch >= 3 else None
+        with STATE.lock:
+            if STATE.training_active or not STATE.model_loaded:
+                raise HTTPException(status_code=503, detail="model unavailable or training")
+            maps = tile_predict(
+                STATE.model, rgb,
+                tile_size=512, overlap=64,
+                device=STATE.device, batch_size=4,
+                normalize=_normalize,
+            )  # (C, H, W) — C=1 (old vias-only model) or C=3 (multi-class)
+        n_ch = maps.shape[0]
+        ch0 = maps[0]
+        ch1 = maps[1] if n_ch >= 2 else None
+        ch2 = maps[2] if n_ch >= 3 else None
 
-    peaks = extract_peaks(ch0, threshold=threshold, min_distance=min_distance)
-    resp: dict = {
-        "point_vias": [{"x": int(x), "y": int(y), "score": float(s)} for (x, y, s) in peaks],
-        "irregular_vias": extract_components(ch1, threshold=threshold) if ch1 is not None else [],
-        "traces": extract_trace_polylines(ch2, threshold=threshold) if ch2 is not None else [],
-        "width": w,
-        "height": h,
-        "num_classes": n_ch,
-        "checkpoint_hash": STATE.checkpoint_hash,
-    }
-    if return_heatmap:
-        # Raw sigmoid maps → RGB PNG: R=point_via, G=irregular_via, B=trace.
-        # 1-class model → point_via in R, G/B zero. Node crops to the exact
-        # tile; frontend colorizes / splits channels.
-        zeros = np.zeros_like(ch0)
-        rgb_hm = np.stack([
-            np.clip(ch0 * 255.0, 0, 255),
-            np.clip((ch1 if ch1 is not None else zeros) * 255.0, 0, 255),
-            np.clip((ch2 if ch2 is not None else zeros) * 255.0, 0, 255),
-        ], axis=-1).astype(np.uint8)
-        ok, png = cv2.imencode(".png", cv2.cvtColor(rgb_hm, cv2.COLOR_RGB2BGR))
-        if not ok:
-            raise HTTPException(status_code=500, detail="heatmap encode failed")
-        resp["heatmap_png_b64"] = base64.b64encode(png.tobytes()).decode("ascii")
-    return resp
+        peaks = extract_peaks(ch0, threshold=threshold, min_distance=min_distance)
+        resp: dict = {
+            "point_vias": [{"x": int(x), "y": int(y), "score": float(s)} for (x, y, s) in peaks],
+            "irregular_vias": extract_components(ch1, threshold=threshold) if ch1 is not None else [],
+            "traces": extract_trace_polylines(ch2, threshold=threshold) if ch2 is not None else [],
+            "width": w,
+            "height": h,
+            "num_classes": n_ch,
+            "checkpoint_hash": STATE.checkpoint_hash,
+        }
+        if return_heatmap:
+            # Raw sigmoid maps → RGB PNG: R=point_via, G=irregular_via, B=trace.
+            # 1-class model → point_via in R, G/B zero. Node crops to the exact
+            # tile; frontend colorizes / splits channels.
+            zeros = np.zeros_like(ch0)
+            rgb_hm = np.stack([
+                np.clip(ch0 * 255.0, 0, 255),
+                np.clip((ch1 if ch1 is not None else zeros) * 255.0, 0, 255),
+                np.clip((ch2 if ch2 is not None else zeros) * 255.0, 0, 255),
+            ], axis=-1).astype(np.uint8)
+            ok, png = cv2.imencode(".png", cv2.cvtColor(rgb_hm, cv2.COLOR_RGB2BGR))
+            if not ok:
+                raise HTTPException(status_code=500, detail="heatmap encode failed")
+            resp["heatmap_png_b64"] = base64.b64encode(png.tobytes()).decode("ascii")
+        return resp
+    finally:
+        PREDICTION_SLOT.release()
 
 
 def _train_worker(job: JobRecord, params: TrainParams, out: str) -> None:
@@ -284,7 +313,9 @@ def _train_worker(job: JobRecord, params: TrainParams, out: str) -> None:
                      should_stop=lambda: job.cancel, use_tqdm=False)
         # Auto-reload: new weights → new checkpoint_hash → Node caches invalidate.
         with STATE.lock:
-            STATE.load(Path(out))
+            if not STATE.load(Path(out)):
+                raise ValueError("Training checkpoint could not be loaded")
+            remember_resident(Path(out))
         with JOBS_LOCK:
             job.status = "done"
             job.checkpoint_path = out
@@ -301,41 +332,59 @@ def _train_worker(job: JobRecord, params: TrainParams, out: str) -> None:
 
 @app.post("/train")
 def train(body: TrainBody) -> dict:
-    if STATE.training_active:
-        raise HTTPException(status_code=409, detail="training already in progress")
-
-    data_dir = Path(body.data_dir)
-    if not data_dir.is_absolute():
-        data_dir = STATE.data_root / body.data_dir
-    if not data_dir.exists():
-        raise HTTPException(status_code=400, detail=f"data_dir not found: {data_dir}")
-
-    if body.output:
-        out = body.output if Path(body.output).is_absolute() else str(ML_DIR / body.output)
-    elif STATE.checkpoint_path:
-        out = str(STATE.checkpoint_path)
-    else:
-        out = str(ML_DIR / "checkpoints" / "model.pt")
-
-    job = JobRecord(job_id=uuid4().hex[:12], kind="train",
-                    status="running", epochs=body.epochs)
-    with JOBS_LOCK:
-        JOBS[job.job_id] = job
-    # Set before the thread starts so an immediate /predict gets 503.
-    STATE.training_active = True
-
-    params = TrainParams(
-        data_dir=str(data_dir),
-        epochs=body.epochs,
-        batch_size=body.batch_size,
-        lr=body.lr,
-        crop_size=body.crop_size,
-        steps_per_epoch=body.steps_per_epoch,
-        encoder=body.encoder,
-        output=out,
-        device=STATE.device,
-    )
-    threading.Thread(target=_train_worker, args=(job, params, out), daemon=True).start()
+    if os.environ.get("CHIPTOOL_ENABLE_TRAINING") != "1":
+        raise HTTPException(status_code=403, detail="Training is disabled")
+    with STATE.lock:
+        if STATE.training_active:
+            raise HTTPException(status_code=409, detail="training already in progress")
+        try:
+            exports = confined_path(STATE.data_root, STATE.data_root / "ml_exports")
+            data_dir = confined_path(exports, STATE.data_root / body.data_dir)
+            if not data_dir.is_dir():
+                raise ValueError("Training directory not found")
+            # Reject symlinked files and excessive datasets before a worker can
+            # traverse them. ROI images are generated by the bounded exporter.
+            files = 0
+            total_bytes = 0
+            for directory, dirs, names in os.walk(data_dir, followlinks=False):
+                for name in [*dirs, *names]:
+                    item = confined_path(exports, Path(directory) / name)
+                    files += 1
+                    if item.is_file():
+                        size = item.stat().st_size
+                        if size > 16 * 1024 * 1024:
+                            raise ValueError("Training sample exceeds limit")
+                        total_bytes += size
+                        if item.suffix.lower() in (".jpg", ".jpeg", ".png"):
+                            with Image.open(item) as header:
+                                w, h = header.size
+                                if w > MAX_REGION_DIMENSION or h > MAX_REGION_DIMENSION or w * h > MAX_REGION_PIXELS:
+                                    raise ValueError("Training image exceeds limit")
+                    if files > 10000 or total_bytes > 1024 * 1024 * 1024:
+                        raise ValueError("Training dataset exceeds limit")
+            checkpoint_dir = confined_path(ML_DIR, ML_DIR / "checkpoints")
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            out = str(confined_path(checkpoint_dir, checkpoint_dir / f"train-{uuid4().hex}.pt"))
+        except (ValueError, OSError):
+            raise HTTPException(status_code=400, detail="Invalid training export directory")
+        job = JobRecord(job_id=uuid4().hex[:12], kind="train", status="running", epochs=body.epochs)
+        with JOBS_LOCK:
+            # Keep bounded job history, preserving the newest records.
+            if len(JOBS) >= 128:
+                JOBS.pop(next(iter(JOBS)))
+            JOBS[job.job_id] = job
+        params = TrainParams(data_dir=str(data_dir), epochs=body.epochs,
+            batch_size=body.batch_size, lr=body.lr, crop_size=body.crop_size,
+            steps_per_epoch=body.steps_per_epoch, encoder=body.encoder,
+            output=out, device=STATE.device, num_workers=0)
+        STATE.training_active = True
+        try:
+            threading.Thread(target=_train_worker, args=(job, params, out), daemon=True).start()
+        except Exception:
+            STATE.training_active = False
+            with JOBS_LOCK:
+                JOBS.pop(job.job_id, None)
+            raise
     return {"job_id": job.job_id}
 
 
@@ -360,9 +409,10 @@ def list_models() -> dict:
     if ckpt_dir.is_dir():
         for p in sorted(ckpt_dir.glob("*.pt")):
             try:
+                p = checked_checkpoint(p.name)
                 h: str | None = checkpoint_hash(p)
-            except Exception:  # noqa: BLE001 — a bad file shouldn't drop the list
-                h = None
+            except Exception:
+                continue
             models.append({
                 "name": p.name,
                 "hash": h,
@@ -372,24 +422,30 @@ def list_models() -> dict:
     return {"models": models}
 
 
+def checked_checkpoint(name: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\.pt", name):
+        raise ValueError("Invalid checkpoint name")
+    root = confined_path(ML_DIR, ML_DIR / "checkpoints")
+    p = confined_path(root, root / name)
+    if not p.is_file() or p.stat().st_size > 1024 * 1024 * 1024:
+        raise ValueError("Checkpoint unavailable")
+    return p
+
+
 @app.post("/model/reload")
 def model_reload(body: ReloadBody) -> dict:
-    if STATE.training_active:
-        raise HTTPException(status_code=409, detail="cannot reload during training")
-    p = Path(body.checkpoint_path)
-    if not p.is_absolute():
-        p = ML_DIR / body.checkpoint_path
-    if not p.exists():
-        raise HTTPException(status_code=400, detail=f"checkpoint not found: {p}")
+    try:
+        p = checked_checkpoint(body.checkpoint_path)
+    except (ValueError, OSError):
+        raise HTTPException(status_code=400, detail="Invalid checkpoint selection")
     with STATE.lock:
-        STATE.load(p)
-    if STATE.model_loaded and STATE.checkpoint_path:
-        remember_resident(STATE.checkpoint_path)
-    return {
-        "checkpoint": STATE.checkpoint_path.name if STATE.checkpoint_path else None,
-        "checkpoint_hash": STATE.checkpoint_hash,
-        "model_loaded": STATE.model_loaded,
-    }
+        if STATE.training_active:
+            raise HTTPException(status_code=409, detail="cannot reload during training")
+        if not STATE.load(p):
+            raise HTTPException(status_code=400, detail="Invalid checkpoint selection")
+        remember_resident(p)
+        return {"checkpoint": STATE.checkpoint_path.name,
+                "checkpoint_hash": STATE.checkpoint_hash, "model_loaded": True}
 
 
 def main() -> None:
@@ -397,12 +453,12 @@ def main() -> None:
     parser.add_argument("--checkpoint", default=os.environ.get("ML_CHECKPOINT"),
                         help="checkpoint to load; default: the last one loaded via "
                              "/model/reload, else checkpoints/model.pt")
-    parser.add_argument("--data-root", default=os.environ.get("ML_DATA_ROOT", str(ML_DIR.parent / "data")))
+    parser.add_argument("--data-root", default=os.environ.get("ML_DATA_ROOT", os.environ.get("CHIPTOOL_DATA_ROOT", str(ML_DIR.parent / "data"))))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=int(os.environ.get("ML_SIDECAR_PORT", 8001)))
     args = parser.parse_args()
 
-    STATE.data_root = Path(args.data_root)
+    STATE.data_root = Path(args.data_root).absolute()
     if args.checkpoint:
         ckpt = Path(args.checkpoint)
         if not ckpt.is_absolute():

@@ -1,3 +1,4 @@
+import { imageWork } from "../workQueue.js";
 import { Router } from "express";
 import type { MLExportRequest } from "shared";
 import { runMLExport } from "../mlExport/exporter.js";
@@ -21,12 +22,12 @@ export function createMLExportRouter(config: { dataRoot: string }) {
 
       // Fire-and-forget. Errors are logged but not surfaced to the client —
       // the client gets 202 once the job is scheduled.
-      void runMLExport({
+      void imageWork(() => runMLExport({
         dataRoot: config.dataRoot,
         dieId,
         approxViaRadiusPx,
         logger: (message) => console.log(message),
-      }).catch((error) => {
+      })).catch((error) => {
         console.error(`[ml-export] ${dieId} failed`, error);
       });
 

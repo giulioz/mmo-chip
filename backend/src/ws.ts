@@ -1,3 +1,4 @@
+import { backendHosts, trustedBrowserRequest, validToken } from "./security.js";
 import type { Server as HttpServer } from "node:http";
 import type { CellDetectionJob, CellImagingJob, MLInferenceJob } from "shared";
 import { WebSocketServer, type WebSocket } from "ws";
@@ -55,23 +56,34 @@ export interface AnnotationBroadcaster {
 }
 
 export function attachWebSocketBroadcaster(httpServer: HttpServer): AnnotationBroadcaster {
-  const wss = new WebSocketServer({ server: httpServer, path: "/api/ws" });
+  const wss = new WebSocketServer({ server: httpServer, path: "/api/ws", maxPayload: 4096,
+    verifyClient: ({ req }: { req: import("node:http").IncomingMessage }) => validToken(req.headers["x-chiptool-token"]) &&
+      (!(req.headers.origin || req.headers["sec-fetch-site"] || req.headers.referer) || trustedBrowserRequest(req, backendHosts))
+  });
   const subscriptions = new Map<WebSocket, Subscription>();
 
   wss.on("connection", (socket) => {
+    if (subscriptions.size >= 64) { socket.close(1013, "Connection limit reached"); return; }
+    let messages = 100;
+    let updated = Date.now();
     const sub: Subscription = { socket, dies: new Set() };
     subscriptions.set(socket, sub);
 
     socket.on("message", (raw) => {
+      const now = Date.now();
+      messages = Math.min(100, messages + (now - updated) * 0.02); updated = now;
+      if (messages < 1) { socket.close(1008, "Message limit reached"); return; }
+      messages--;
       let msg: ClientMessage;
       try {
         msg = JSON.parse(raw.toString()) as ClientMessage;
       } catch {
         return; // ignore malformed
       }
+      if (!msg || typeof msg !== "object" || Array.isArray(msg)) return;
       switch (msg.type) {
         case "subscribe":
-          if (typeof msg.dieId === "string") sub.dies.add(msg.dieId);
+          if (typeof msg.dieId === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(msg.dieId) && sub.dies.size < 256) sub.dies.add(msg.dieId);
           return;
         case "unsubscribe":
           if (typeof msg.dieId === "string") sub.dies.delete(msg.dieId);

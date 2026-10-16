@@ -1,5 +1,5 @@
+import { dataPath, HttpError, safeId } from "./security.js";
 import { promises as fs } from "node:fs";
-import path from "node:path";
 import { ensureTileForRecord } from "./dieImport/importer.js";
 import type { DieRecord } from "./types.js";
 
@@ -57,6 +57,9 @@ export function createTileScheduler(config: {
   }
 
   async function requestTile(record: DieRecord, z: number, x: number, y: number) {
+    safeId(record.id);
+    const level = record.levels[z];
+    if (![z, x, y].every(n => Number.isSafeInteger(n) && n >= 0) || !level || x >= level.columns || y >= level.rows) throw new Error("Tile coordinates out of range");
     if (deletedDies.has(record.id)) {
       throw new Error("Die has been deleted.");
     }
@@ -125,6 +128,7 @@ export function createTileScheduler(config: {
       return existing;
     }
 
+    if (activeTasks.size >= 256) throw new HttpError(429, "Tile queue is full; retry later");
     let resolve!: (tilePath: string) => void;
     let reject!: (error: unknown) => void;
     const promise = new Promise<string>((resolvePromise, rejectPromise) => {
@@ -304,5 +308,5 @@ export function createTileScheduler(config: {
 }
 
 function buildTilePath(dataRoot: string, dieId: string, z: number, x: number, y: number) {
-  return path.join(dataRoot, "dies", dieId, "tiles", String(z), `${x}_${y}.jpg`);
+  return dataPath(dataRoot, "dies", safeId(dieId), "tiles", String(z), `${x}_${y}.jpg`);
 }

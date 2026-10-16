@@ -9,6 +9,8 @@ import { ProblemsPanel } from "../components/code/ProblemsPanel";
 import { useDie } from "../api/dies";
 import { useAnnotations } from "../api/annotations";
 import { useAnnotationsWebSocket } from "../api/annotationsWebSocket";
+import { useCellLibrary } from "../api/cellLibrary";
+import { withLibraryTypes } from "../lib/cellLibrary";
 import { useSession } from "../state/session";
 import { useDieCode } from "../api/codeGen";
 import { Ic } from "../icons";
@@ -45,7 +47,16 @@ function Code({ dieId }: { dieId: string }) {
   const die = useDie(dieId).data;
   const annotationsQ = useAnnotations(dieId);
   useAnnotationsWebSocket(dieId);
-  const annotations = annotationsQ.data;
+  // Cells placed from the cell library resolve (and extract) through their
+  // owner die's types, scaled to this die.
+  const library = useCellLibrary(dieId, annotationsQ.data);
+  const annotations = useMemo(
+    () =>
+      annotationsQ.data
+        ? withLibraryTypes(annotationsQ.data, library, { usedOnly: true })
+        : undefined,
+    [annotationsQ.data, library]
+  );
 
   // Module name: prefer a sanitised die name. Falls back to the id so we
   // always have something to print, even before `die` arrives.

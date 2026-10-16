@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
-import type { Cell, DieAnnotations, LayerType } from "shared";
+import { useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
+import type { Cell, CellType, DieAnnotations, LayerType } from "shared";
 import { TreeRow, TreeSep } from "../tree/TreeRow";
+import { OtherDieBadge } from "../cellLibrary/OtherDieBadge";
+import type { ForeignType, RemoteInstance } from "../../lib/cellLibrary";
 import { Ic } from "../../icons";
 import {
   selectReLayerVisible,
@@ -19,7 +21,19 @@ import { COLOR_LAYER, COLOR_VIA, NET_COLOR } from "../../renderer/annotations/st
 
 interface Props {
   annotations: DieAnnotations;
-  onCellContextMenu: (cell: Cell, clientX: number, clientY: number) => void;
+  /** Types owned by another die of the cell library (badged, listed after
+   *  this die's own). */
+  foreignTypes?: ReadonlyMap<string, ForeignType>;
+  /** A type's instances on the library's other dies — listed after this
+   *  die's own, badged. */
+  remoteMembersOf?: (cellTypeId: string) => RemoteInstance[];
+  /** `dieId` is set for an instance on another die. */
+  onCellContextMenu: (cell: Cell, clientX: number, clientY: number, dieId?: string) => void;
+  onCellTypeContextMenu: (
+    cellType: CellType,
+    clientX: number,
+    clientY: number
+  ) => void;
 }
 
 const SHAPE_LAYERS: LayerType[] = ["diffusion", "polysilicon", "metal1", "metal2"];
@@ -48,7 +62,14 @@ const ALL_TOGGLEABLE_LAYER_KEYS: ReadonlyArray<string> = [
  *  below. The visibility list also surfaces (disabled) the inferred
  *  transistors/nets group and the die-viewer overlay group as
  *  forward-looking placeholders. */
-export function CellRELeftPanel({ annotations, onCellContextMenu }: Props) {
+export function CellRELeftPanel({
+  annotations,
+  foreignTypes,
+  remoteMembersOf,
+  onCellContextMenu,
+  onCellTypeContextMenu
+}: Props) {
+  const remoteOf = (id: string): RemoteInstance[] => remoteMembersOf?.(id) ?? [];
   const activeCellTypeId = useCellREStore((s) => s.activeCellTypeId);
   const activeCellId = useCellREStore((s) => s.activeCellId);
   const expandedTypes = useCellREStore((s) => s.expandedTypes);
@@ -64,10 +85,24 @@ export function CellRELeftPanel({ annotations, onCellContextMenu }: Props) {
   const setInferredOpen = useCellREStore((s) => s.setInferredOpen);
   const setDieViewerLayersOpen = useCellREStore((s) => s.setDieViewerLayersOpen);
 
-  const { matched, unmatched } = useMemo(
-    () => groupCellTypes(annotations),
-    [annotations]
-  );
+  // This die's own types first, then the ones shared from other dies.
+  const { matched, unmatched, firstShared } = useMemo(() => {
+    const g = groupCellTypes(annotations);
+    const shared = (ct: CellType) => foreignTypes?.has(ct.id) === true;
+    const matched = [...g.matched.filter((ct) => !shared(ct)), ...g.matched.filter(shared)];
+    return { matched, unmatched: g.unmatched, firstShared: matched.findIndex(shared) };
+  }, [annotations, foreignTypes]);
+  const typeLabel = (ct: CellType): ReactNode => {
+    const f = foreignTypes?.get(ct.id);
+    return f ? (
+      <>
+        {ct.name}
+        <OtherDieBadge owner={f.ownerName} />
+      </>
+    ) : (
+      ct.name
+    );
+  };
 
   // ── Arrow-key navigation through the cell-types list ──────────────
   // Flat list of (cellTypeId, cellId|null) entries in the order they'd render
@@ -80,13 +115,15 @@ export function CellRELeftPanel({ annotations, onCellContextMenu }: Props) {
       if (expandedTypes.includes(ct.id)) {
         for (const m of membersOf(annotations, ct.id))
           out.push({ ctId: ct.id, cellId: m.id });
+        for (const r of remoteMembersOf?.(ct.id) ?? [])
+          out.push({ ctId: ct.id, cellId: r.cell.id });
       }
     }
     if (unmatchedOpen) {
       for (const ct of unmatched) out.push({ ctId: ct.id, cellId: null });
     }
     return out;
-  }, [annotations, matched, unmatched, expandedTypes, unmatchedOpen]);
+  }, [annotations, matched, unmatched, expandedTypes, unmatchedOpen, remoteMembersOf]);
 
   const treeRef = useRef<HTMLDivElement | null>(null);
   const step = useCallback(
@@ -147,21 +184,31 @@ export function CellRELeftPanel({ annotations, onCellContextMenu }: Props) {
         tabIndex={0}
         style={{ overflow: "auto", flex: "1 1 55%", minHeight: 80, outline: "none" }}
       >
-        {matched.map((ct) => {
+        {matched.map((ct, i) => {
           const open = expandedTypes.includes(ct.id);
           const members = membersOf(annotations, ct.id);
+          const remote = remoteOf(ct.id);
           return (
             <div key={ct.id}>
-              <TreeRow
-                icon={Ic.cell}
-                expand={members.length ? (open ? "open" : "closed") : "leaf"}
-                label={ct.name}
-                meta={members.length}
-                monoLabel
-                selected={activeCellTypeId === ct.id && activeCellId == null}
-                onToggleExpand={() => toggleType(ct.id)}
-                onSelect={() => setActiveCellType(ct.id, null)}
-              />
+              {i > 0 && i === firstShared && <TreeSep />}
+              <div
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setActiveCellType(ct.id, null);
+                  onCellTypeContextMenu(ct, e.clientX, e.clientY);
+                }}
+              >
+                <TreeRow
+                  icon={Ic.cell}
+                  expand={members.length + remote.length ? (open ? "open" : "closed") : "leaf"}
+                  label={typeLabel(ct)}
+                  meta={remote.length ? `${members.length}+${remote.length}` : members.length}
+                  monoLabel
+                  selected={activeCellTypeId === ct.id && activeCellId == null}
+                  onToggleExpand={() => toggleType(ct.id)}
+                  onSelect={() => setActiveCellType(ct.id, null)}
+                />
+              </div>
               {open &&
                 members.map((m) => (
                   <div
@@ -185,6 +232,36 @@ export function CellRELeftPanel({ annotations, onCellContextMenu }: Props) {
                     />
                   </div>
                 ))}
+              {open &&
+                // Instances on the library's other dies, after this die's own.
+                remote.map((r) => (
+                  <div
+                    key={`${r.dieId}:${r.cell.id}`}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setActiveCellType(ct.id, r.cell.id);
+                      onCellContextMenu(r.cell, e.clientX, e.clientY, r.dieId);
+                    }}
+                  >
+                    <TreeRow
+                      depth={1}
+                      icon={Ic.cell}
+                      label={
+                        <>
+                          {`cell ${r.cell.id.slice(0, 6)}`}
+                          <OtherDieBadge owner={r.dieName} />
+                        </>
+                      }
+                      monoLabel
+                      dimmed
+                      selected={activeCellTypeId === ct.id && activeCellId === r.cell.id}
+                      onSelect={() => {
+                        if (activeCellTypeId !== ct.id) setActiveCellType(ct.id, r.cell.id);
+                        else setActiveCell(r.cell.id);
+                      }}
+                    />
+                  </div>
+                ))}
             </div>
           );
         })}
@@ -201,17 +278,25 @@ export function CellRELeftPanel({ annotations, onCellContextMenu }: Props) {
         />
         {unmatchedOpen &&
           unmatched.map((ct) => (
-            <TreeRow
+            <div
               key={ct.id}
-              depth={1}
-              icon={Ic.cell}
-              label={ct.name}
-              meta={membersOf(annotations, ct.id).length}
-              monoLabel
-              dimmed
-              selected={activeCellTypeId === ct.id}
-              onSelect={() => setActiveCellType(ct.id, null)}
-            />
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setActiveCellType(ct.id, null);
+                onCellTypeContextMenu(ct, e.clientX, e.clientY);
+              }}
+            >
+              <TreeRow
+                depth={1}
+                icon={Ic.cell}
+                label={typeLabel(ct)}
+                meta={membersOf(annotations, ct.id).length}
+                monoLabel
+                dimmed
+                selected={activeCellTypeId === ct.id}
+                onSelect={() => setActiveCellType(ct.id, null)}
+              />
+            </div>
           ))}
 
         <TreeRow

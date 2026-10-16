@@ -4,7 +4,7 @@ import type { AnnotationAction } from "../api/actions";
 
 /** Which right-panel tab is showing. The ML tab also drives a render mode:
  *  traces/vias size from `mlConfig` instead of display preferences. */
-export type InspectorTab = "inspector" | "ml";
+export type InspectorTab = "inspector" | "ml" | "cells";
 
 /** Mockup defaults for the ML config until a real per-die value is seeded
  *  from the annotations blob. Source-pixel units. */
@@ -25,6 +25,7 @@ export type ToolKind =
   | "cellGuideLine"
   | "cellGuideSeg"
   | "ioPoint"
+  | "libraryCell"
   | "roi"
   | "ignore";
 
@@ -55,6 +56,10 @@ interface DieViewerState {
   expandedGroups: string[];
   /** Tool currently selected in the sub-toolbar. */
   activeTool: ToolKind;
+  /** The die whose edits the undo / redo stacks hold (relative to it: parts
+   *  on other dies are wrapped in `onDie`). Another die's dispatcher leaves
+   *  them alone, and its first edit starts a fresh history. */
+  historyDieId: string | null;
   /** Actions the user has applied, newest at the end. */
   undoStack: AnnotationAction[];
   /** Actions that were undone and can be redone, newest at the end. */
@@ -78,6 +83,14 @@ interface DieViewerState {
    *  having to walk the cache itself. Partial: it's the count for tiles
    *  fetched so far this session, not a die-wide ground truth. */
   mlViasCount: number;
+  /** Cell type picked in the Cells (detection) tab — from the dropdown or by
+   *  selecting a placed cell on the canvas while the tab is open. */
+  cellDetectionTypeId: string | null;
+  /** Proposals currently shown on the canvas (after threshold / overlap
+   *  filtering). Drives the outline-tree count. */
+  cellDetectionsCount: number;
+  /** A wire-likelihood map exists for this die (drives the outline row). */
+  wireMapAvailable: boolean;
 }
 
 interface DieViewerActions {
@@ -85,6 +98,8 @@ interface DieViewerActions {
   clearSelection: () => void;
   toggleGroup: (id: string) => void;
   setActiveTool: (tool: ToolKind) => void;
+  /** Make the history `dieId`'s, dropping another die's stacks. */
+  claimHistory: (dieId: string) => void;
   pushUndo: (action: AnnotationAction) => void;
   popUndo: () => AnnotationAction | undefined;
   pushRedo: (action: AnnotationAction) => void;
@@ -98,6 +113,9 @@ interface DieViewerActions {
   setMlConfig: (patch: Partial<DieMLConfig>) => void;
   /** Set the live ML-via cardinality — called by the layer when tiles load. */
   setMlViasCount: (count: number) => void;
+  setCellDetectionTypeId: (id: string | null) => void;
+  setCellDetectionsCount: (count: number) => void;
+  setWireMapAvailable: (available: boolean) => void;
   /** Wipe transient state — called when navigating to a different die. */
   reset: () => void;
 }
@@ -108,13 +126,17 @@ const INITIAL_STATE: DieViewerState = {
   selectedIds: EMPTY_SELECTION,
   expandedGroups: [],
   activeTool: "select",
+  historyDieId: null,
   undoStack: [],
   redoStack: [],
   undoOverride: null,
   wireLayer: null,
   guideAxis: "x",
   mlConfig: { ...DEFAULT_ML_CONFIG },
-  mlViasCount: 0
+  mlViasCount: 0,
+  cellDetectionTypeId: null,
+  cellDetectionsCount: 0,
+  wireMapAvailable: false
 };
 
 /**
@@ -166,6 +188,9 @@ export const useDieViewerStore = create<DieViewerState & DieViewerActions>()((se
           : EMPTY_SELECTION
     })),
 
+  claimHistory: (dieId) => {
+    if (get().historyDieId !== dieId) set({ historyDieId: dieId, undoStack: [], redoStack: [] });
+  },
   pushUndo: (action) =>
     set((state) => ({ undoStack: [...state.undoStack, action] })),
   popUndo: () => {
@@ -193,6 +218,15 @@ export const useDieViewerStore = create<DieViewerState & DieViewerActions>()((se
   setMlViasCount: (count) => {
     if (get().mlViasCount === count) return;
     set({ mlViasCount: count });
+  },
+  setCellDetectionTypeId: (id) => set({ cellDetectionTypeId: id }),
+  setCellDetectionsCount: (count) => {
+    if (get().cellDetectionsCount === count) return;
+    set({ cellDetectionsCount: count });
+  },
+  setWireMapAvailable: (available) => {
+    if (get().wireMapAvailable === available) return;
+    set({ wireMapAvailable: available });
   },
 
   reset: () => set(INITIAL_STATE)

@@ -74,8 +74,6 @@ export const CELL_OUTLINE_ALPHA = 0.8;
 export const CELL_FILL_ALPHA = 0.16;
 /** Cell outline width in screen px (constant regardless of zoom). */
 export const CELL_OUTLINE_PX = 2;
-/** Below this zoom, cells render as a solid block instead of inner shapes. */
-export const CELL_DETAIL_ZOOM = 0.2;
 
 // ── Nets ─────────────────────────────────────────────────────────────
 

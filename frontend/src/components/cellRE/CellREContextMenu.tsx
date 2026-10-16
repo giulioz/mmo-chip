@@ -6,6 +6,8 @@ export interface ReContextMenuState {
   cellId: string;
   /** Same as merge: enabled only when the type has > 1 member. */
   canUnmatch: boolean;
+  /** The instance is on another die of the cell library (edits go there). */
+  dieId?: string;
 }
 
 interface Props {

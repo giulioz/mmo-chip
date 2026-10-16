@@ -150,11 +150,13 @@ export async function writeMLJob(
   job: MLInferenceJob
 ): Promise<void> {
   await fs.mkdir(path.join(dataRoot, "ml-jobs"), { recursive: true });
-  await fs.writeFile(
-    path.join(dataRoot, "ml-jobs", `${job.dieId}.json`),
-    `${JSON.stringify(job, null, 2)}\n`,
-    "utf8"
-  );
+  // Atomic (tmp + rename): a sweep persists progress on every tick without
+  // awaiting, so plain writeFile calls can interleave and a concurrent
+  // reader would see one body partially overwritten by another.
+  const file = path.join(dataRoot, "ml-jobs", `${job.dieId}.json`);
+  const tmp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+  await fs.writeFile(tmp, `${JSON.stringify(job, null, 2)}\n`, "utf8");
+  await fs.rename(tmp, file);
 }
 
 /** Drop every persisted ML job — used when the model changes (the old jobs'

@@ -206,6 +206,208 @@ export function translateShape(shape: LayerShape, dx: number, dy: number): Layer
   }
 }
 
+/** Map every vertex of a shape through `f`; sizes, widths and radii stay as
+ *  they are. Rects map two opposite corners and re-normalise, so `f` must
+ *  keep axes axis-aligned (translations, scales, quarter turns). Pure: same
+ *  id and metadata. */
+export function mapShapePoints(shape: LayerShape, f: (p: Point) => Point): LayerShape {
+  switch (shape.kind) {
+    case "rect": {
+      const a = f({ x: shape.x, y: shape.y });
+      const b = f({ x: shape.x + shape.width, y: shape.y + shape.height });
+      return {
+        ...shape,
+        ...normalizeRect({ x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y })
+      };
+    }
+    case "point":
+    case "circle":
+      return { ...shape, ...f({ x: shape.x, y: shape.y }) };
+    case "polygon":
+      return { ...shape, points: shape.points.map((p) => f(p)) };
+    case "line": {
+      const a = f({ x: shape.x1, y: shape.y1 });
+      const b = f({ x: shape.x2, y: shape.y2 });
+      return { ...shape, x1: a.x, y1: a.y, x2: b.x, y2: b.y };
+    }
+  }
+}
+
+/** Turn a shape a quarter turn inside its W×H cell box (`deg` 90 = clockwise
+ *  on screen, −90 = counter-clockwise), landing in the H×W box the turn
+ *  produces. Pure: same id and metadata. */
+export function rotateShape(
+  shape: LayerShape,
+  deg: 90 | -90,
+  boxW: number,
+  boxH: number
+): LayerShape {
+  return mapShapePoints(shape, boxTurn(deg, boxW, boxH));
+}
+
+/** `rotateShape` over every layer of a cell type. */
+export function rotateLayers(
+  layers: CellLayers,
+  deg: 90 | -90,
+  boxW: number,
+  boxH: number
+): CellLayers {
+  return mapLayerPoints(layers, boxTurn(deg, boxW, boxH));
+}
+
+/** Point map: a quarter turn of a W×H cell box into the H×W box it becomes. */
+function boxTurn(deg: 90 | -90, boxW: number, boxH: number): (p: Point) => Point {
+  return deg === 90 ? (p) => ({ x: boxH - p.y, y: p.x }) : (p) => ({ x: p.y, y: boxW - p.x });
+}
+
+/** `mapShapePoints` over every layer of a cell type. */
+export function mapLayerPoints(layers: CellLayers, f: (p: Point) => Point): CellLayers {
+  const out: CellLayers = {};
+  for (const [layer, shapes] of Object.entries(layers) as Array<
+    [LayerType, LayerShape[] | undefined]
+  >) {
+    if (shapes) out[layer] = shapes.map((s) => mapShapePoints(s, f));
+  }
+  return out;
+}
+
+// ── Group transforms (a multi-selection edited as one) ────────────────
+
+/** Joint bounds of the shapes' vertices (their `shapeHandles`) — the box a
+ *  group rotates and scales by. Null when there are no shapes. */
+export function shapesBounds(shapes: Iterable<LayerShape>): Rect | null {
+  const pts: Point[] = [];
+  for (const s of shapes) pts.push(...shapeHandles(s));
+  return polygonBounds(pts);
+}
+
+/** Point map: a quarter turn about `c` (90 = clockwise on screen). */
+export function quarterTurnAbout(c: Point, deg: 90 | -90): (p: Point) => Point {
+  return deg === 90
+    ? (p) => ({ x: c.x - (p.y - c.y), y: c.y + (p.x - c.x) })
+    : (p) => ({ x: c.x + (p.y - c.y), y: c.y - (p.x - c.x) });
+}
+
+/** Point map: a mirror across the vertical (`"h"`: flips left↔right) or
+ *  horizontal (`"v"`: top↔bottom) line through `c`. */
+export function mirrorAbout(c: Point, axis: "h" | "v"): (p: Point) => Point {
+  return axis === "h"
+    ? (p) => ({ x: 2 * c.x - p.x, y: p.y })
+    : (p) => ({ x: p.x, y: 2 * c.y - p.y });
+}
+
+/** Point map: scale by `(sx, sy)` about `anchor`. */
+export function scaleAbout(anchor: Point, sx: number, sy: number): (p: Point) => Point {
+  return (p) => ({
+    x: anchor.x + (p.x - anchor.x) * sx,
+    y: anchor.y + (p.y - anchor.y) * sy
+  });
+}
+
+/**
+ * Scale factors that carry a box's `corner` to `target` while the opposite
+ * `anchor` corner stays put. A zero-extent axis stays at 1, and each axis
+ * keeps at least one unit of extent (no collapsing or flipping through the
+ * anchor). `uniform` keeps the aspect ratio, following the axis that changed
+ * most.
+ */
+export function cornerScale(
+  anchor: Point,
+  corner: Point,
+  target: Point,
+  uniform: boolean
+): { sx: number; sy: number } {
+  const extX = corner.x - anchor.x;
+  const extY = corner.y - anchor.y;
+  const minX = extX === 0 ? 0 : 1 / Math.abs(extX);
+  const minY = extY === 0 ? 0 : 1 / Math.abs(extY);
+  let sx = extX === 0 ? 1 : Math.max((target.x - anchor.x) / extX, minX);
+  let sy = extY === 0 ? 1 : Math.max((target.y - anchor.y) / extY, minY);
+  if (uniform) {
+    const s =
+      extX === 0 ? sy : extY === 0 ? sx : Math.abs(sx - 1) >= Math.abs(sy - 1) ? sx : sy;
+    sx = sy = Math.max(s, minX, minY);
+  }
+  return { sx, sy };
+}
+
+/** Replace several existing shapes (matched by layer + id) in one cell-type
+ *  upsert — a single undo step for a group edit. Null when none of them
+ *  exist. */
+export function buildReplaceShapesAction(
+  cellType: CellType,
+  replacements: ReadonlyArray<{ layer: LayerType; shape: LayerShape }>
+): AnnotationAction | null {
+  const byLayer = new Map<LayerType, Map<string, LayerShape>>();
+  for (const r of replacements) {
+    let m = byLayer.get(r.layer);
+    if (!m) {
+      m = new Map();
+      byLayer.set(r.layer, m);
+    }
+    m.set(r.shape.id, r.shape);
+  }
+  let layers = cellType.layers;
+  let touched = false;
+  for (const [layer, next] of byLayer) {
+    layers = withLayer(layers, layer, (cur) =>
+      cur.map((s) => {
+        const r = next.get(s.id);
+        if (!r) return s;
+        touched = true;
+        return r;
+      })
+    );
+  }
+  if (!touched) return null;
+  return { kind: "upsertCellType", cellType: { ...cellType, layers }, prevCellType: cellType };
+}
+
+/** Quarter-turn a group of shapes about the centre of their joint bounds, in
+ *  one undo step. Null when that changes nothing (no shapes, a lone point, a
+ *  lone square). */
+export function buildRotateShapesAction(
+  cellType: CellType,
+  items: ReadonlyArray<{ layer: LayerType; shape: LayerShape }>,
+  deg: 90 | -90
+): AnnotationAction | null {
+  return buildGroupMapAction(cellType, items, (c) => quarterTurnAbout(c, deg));
+}
+
+/** Mirror a group of shapes across the centre line of their joint bounds
+ *  (`"h"` left↔right, `"v"` top↔bottom), in one undo step. Null when that
+ *  changes nothing (no shapes, a lone rect or point). */
+export function buildFlipShapesAction(
+  cellType: CellType,
+  items: ReadonlyArray<{ layer: LayerType; shape: LayerShape }>,
+  axis: "h" | "v"
+): AnnotationAction | null {
+  return buildGroupMapAction(cellType, items, (c) => mirrorAbout(c, axis));
+}
+
+/** Map a group's vertices through `mapFor(centre of their joint bounds)` as
+ *  one replace; null when every vertex stays where it was. */
+function buildGroupMapAction(
+  cellType: CellType,
+  items: ReadonlyArray<{ layer: LayerType; shape: LayerShape }>,
+  mapFor: (centre: Point) => (p: Point) => Point
+): AnnotationAction | null {
+  const b = shapesBounds(items.map((i) => i.shape));
+  if (!b) return null;
+  const f = mapFor({ x: b.x + b.width / 2, y: b.y + b.height / 2 });
+  let moved = false;
+  const replacements = items.map((i) => {
+    const shape = mapShapePoints(i.shape, f);
+    const before = shapeHandles(i.shape);
+    const after = shapeHandles(shape);
+    if (after.some((p, k) => Math.abs(p.x - before[k].x) > 1e-9 || Math.abs(p.y - before[k].y) > 1e-9)) {
+      moved = true;
+    }
+    return { layer: i.layer, shape };
+  });
+  return moved ? buildReplaceShapesAction(cellType, replacements) : null;
+}
+
 // ── Per-vertex handles ────────────────────────────────────────────────
 
 /** Vertices to render as drag handles for `shape` — corners for rect-likes,

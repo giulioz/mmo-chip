@@ -5,7 +5,7 @@ import type {
   LayerShape,
   LayerType
 } from "shared";
-import type { CellREClipboardItem } from "../state/cellRE";
+import { parseShapeKey, type CellREClipboardItem } from "../state/cellRE";
 
 /**
  * Cells-RE-page-specific glue. Generic LayerShape geometry / mutation / action
@@ -39,6 +39,23 @@ export function resolveActiveCell(
     annotations.cells.find((c) => c.cellTypeId === cellType.id) ??
     null;
   return { cellType, cell };
+}
+
+// ── Selection ────────────────────────────────────────────────────────
+
+/** The selected shapes (keyed `${layer}:${id}`) as they stand in the cell
+ *  type; keys that no longer resolve are skipped. */
+export function selectedShapes(
+  cellType: CellType,
+  selectedKeys: Iterable<string>
+): Array<{ layer: LayerType; shape: LayerShape }> {
+  const out: Array<{ layer: LayerType; shape: LayerShape }> = [];
+  for (const key of selectedKeys) {
+    const p = parseShapeKey(key);
+    const shape = p ? cellType.layers?.[p.layer]?.find((s) => s.id === p.id) : undefined;
+    if (p && shape) out.push({ layer: p.layer, shape });
+  }
+  return out;
 }
 
 // ── Clipboard ────────────────────────────────────────────────────────

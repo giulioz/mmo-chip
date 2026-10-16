@@ -22,6 +22,15 @@ import { useDie } from "../api/dies";
 import { useAnnotations } from "../api/annotations";
 import { useAnnotationsWebSocket } from "../api/annotationsWebSocket";
 import { useActionDispatcher } from "../api/actions";
+import { useCellLibrary, useForeignTypeImageUrl } from "../api/cellLibrary";
+import {
+  buildLibraryTypeTransform,
+  libraryMemberCount,
+  remoteInstances,
+  routeLibraryAction,
+  withLibraryTypes,
+  type RemoteInstance
+} from "../lib/cellLibrary";
 import { useSession } from "../state/session";
 import { useCellREStore, TOOL_LAYERS } from "../state/cellRE";
 import { usePreferences } from "../state/preferences";
@@ -30,26 +39,31 @@ import { isTypingTarget } from "../lib/keyboard";
 import {
   PASTE_OFFSET,
   resolveActiveCell,
+  selectedShapes,
   snapshotForClipboard
 } from "../lib/cellRE";
 import {
+  buildFlipShapesAction,
   buildInsertShapesAction,
   buildRemoveShapesAction,
   buildRenameCellTypeAction,
+  buildRotateShapesAction,
   buildSetShapeCustomNameAction,
   buildSetShapeForcedTypesAction,
   buildSetShapeLabelsAction,
   translateShape
 } from "../lib/cellLayers";
 import {
+  buildMarkMatchedAction,
   buildOrientAction,
   buildUnmatchAction,
-  cellCropUrl,
   cellTypeById,
   cellTypeCropUrl,
   membersOf,
-  rotateCw
+  orientOf,
+  rotateView
 } from "../lib/mergeCells";
+import { cellFootprint, sameFrame } from "../lib/cellDetection";
 import {
   CellRECanvas,
   type CellRECanvasHandle,
@@ -70,15 +84,21 @@ import {
   type ReContextMenuState
 } from "../components/cellRE/CellREContextMenu";
 import {
+  CellTypeContextMenu,
+  type CellTypeContextMenuState
+} from "../components/cellRE/CellTypeContextMenu";
+import {
   ShapeContextMenu,
   type AppliedForcedType,
   type AppliedLabel,
-  type ShapeContextMenuState
+  type ShapeContextMenuState,
+  type ShapeMenuAnchor
 } from "../components/cellRE/ShapeContextMenu";
 import type { CellType } from "shared";
 import { useLayerPolyTool } from "../components/cellRE/useLayerPolyTool";
 import { parseShapeKey, shapeKey } from "../state/cellRE";
 import { useCellExtraction } from "../api/cellExtraction";
+import { specimenImageUrl, useCellSpecimens } from "../api/cellImaging";
 import { netDisplayName } from "../lib/labels";
 import type { CellExtraction, ExtractedNet } from "../lib/extraction";
 
@@ -108,8 +128,20 @@ function RE({ dieId }: { dieId: string }) {
   const die = useDie(dieId).data;
   const annotationsQ = useAnnotations(dieId);
   useAnnotationsWebSocket(dieId);
-  const annotations = annotationsQ.data;
-  const dispatcher = useActionDispatcher(dieId);
+  const ownAnnotations = annotationsQ.data;
+  // Other dies' types shared through the cell library, merged in at this
+  // die's scale: RE'ing one here edits it for every die (routed to the die
+  // that owns it, in its pixels).
+  const library = useCellLibrary(dieId, ownAnnotations);
+  const libraryRef = useRef(library);
+  libraryRef.current = library;
+  const annotations = useMemo(
+    () => (ownAnnotations ? withLibraryTypes(ownAnnotations, library) : undefined),
+    [ownAnnotations, library]
+  );
+  const dispatcher = useActionDispatcher(dieId, {
+    route: (action) => routeLibraryAction(action, libraryRef.current)
+  });
 
   // ── State (transient page + persisted prefs) ───────────────────────
   const activeCellTypeId = useCellREStore((s) => s.activeCellTypeId);
@@ -129,9 +161,12 @@ function RE({ dieId }: { dieId: string }) {
   const setCanvasTab = useCellREStore((s) => s.setCanvasTab);
 
   const layerHidden = usePreferences((s) => s.reLayerHidden);
+  const useCleanSpecimens = usePreferences((s) => s.useCleanSpecimens);
+  const specimenIndex = useCellSpecimens(dieId).data ?? null;
 
   const canvasRef = useRef<CellRECanvasHandle | null>(null);
   const [menu, setMenu] = useState<ReContextMenuState | null>(null);
+  const [typeMenu, setTypeMenu] = useState<CellTypeContextMenuState | null>(null);
   const [shapeMenu, setShapeMenu] = useState<ShapeContextMenuState | null>(null);
   // What the canvas cursor is currently over. Page-local because two
   // consumers want it (status bar + right-panel row highlight) and both
@@ -230,11 +265,33 @@ function RE({ dieId }: { dieId: string }) {
     if (changed) setSearchParams(next, { replace: true });
   }, [activeCellTypeId, activeCellId, canvasTab, params, setSearchParams]);
 
+  // A type's instances on the library's other dies — listed after this
+  // die's own in the tree; picking one shows its own die's pixels, scaled
+  // to this die.
+  const remoteMembersOf = useMemo(() => {
+    const cache = new Map<string, RemoteInstance[]>();
+    return (typeId: string): RemoteInstance[] => {
+      if (!ownAnnotations) return [];
+      let hit = cache.get(typeId);
+      if (!hit) cache.set(typeId, (hit = remoteInstances(library, ownAnnotations, typeId)));
+      return hit;
+    };
+  }, [library, ownAnnotations]);
+
   // ── Resolve current cell type + instance ──────────────────────────
-  const { cellType, cell } = useMemo(() => {
+  const { cellType, cell: localCell } = useMemo(() => {
     if (!annotations) return { cellType: null, cell: null };
     return resolveActiveCell(annotations, activeCellTypeId, activeCellId);
   }, [annotations, activeCellTypeId, activeCellId]);
+  const remoteCell = useMemo(
+    () =>
+      cellType && activeCellId
+        ? (remoteMembersOf(cellType.id).find((r) => r.cell.id === activeCellId) ?? null)
+        : null,
+    [cellType, activeCellId, remoteMembersOf]
+  );
+  const cell = remoteCell ? remoteCell.cell : localCell;
+  const remoteDie = useDie(remoteCell?.dieId).data;
 
   // ── Cell extraction (shared between canvas + right panel) ────────
   // Single-source the hook here so the canvas's diffusion-type overlay and
@@ -295,11 +352,12 @@ function RE({ dieId }: { dieId: string }) {
   // initial hydration set a non-existent id; once annotations load, drop
   // back to the auto-select path so the page stays usable.
   useEffect(() => {
-    if (!annotations || !activeCellTypeId) return;
+    // (A library type only resolves once its die's annotations are in.)
+    if (!annotations || !activeCellTypeId || library.loading) return;
     if (!annotations.cellTypes.some((ct) => ct.id === activeCellTypeId)) {
       setActiveCellType(null, null);
     }
-  }, [annotations, activeCellTypeId, setActiveCellType]);
+  }, [annotations, activeCellTypeId, setActiveCellType, library.loading]);
 
   // Switching the active tool to one whose layer doesn't accept the current
   // layer (e.g. rect → point: "polysilicon" isn't in TOOL_LAYERS.point)
@@ -322,9 +380,12 @@ function RE({ dieId }: { dieId: string }) {
   const orient = useCallback(
     (
       target: Cell,
-      patch: Partial<Pick<Cell, "flippedH" | "flippedV" | "rotation">>
+      patch: Partial<Pick<Cell, "flippedH" | "flippedV" | "rotation">>,
+      /** Set for an instance on another die: the edit goes there. */
+      onDieId?: string
     ) => {
-      void dispatcher.dispatch(buildOrientAction(target, patch));
+      const action = buildOrientAction(target, patch);
+      void dispatcher.dispatch(onDieId ? { kind: "onDie", dieId: onDieId, action } : action);
     },
     [dispatcher]
   );
@@ -337,16 +398,56 @@ function RE({ dieId }: { dieId: string }) {
     [annotations, dispatcher]
   );
 
+  // ── Cell-type rotation / flip (right-click on a type row) ─────────
+  // Turns or mirrors every instance plus the type's layer shapes in one
+  // undo step — on every die of the library that places it, each in its
+  // own pixels, with the definition changed on the die that owns it.
+  const rotateCellType = useCallback(
+    (cellTypeId: string, deg: 90 | -90) => {
+      if (!ownAnnotations) return;
+      const action = buildLibraryTypeTransform(library, ownAnnotations, cellTypeId, {
+        kind: "rotate",
+        deg
+      });
+      if (action) void dispatcher.dispatch(action);
+    },
+    [ownAnnotations, library, dispatcher]
+  );
+
+  const flipCellType = useCallback(
+    (cellTypeId: string, axis: "h" | "v") => {
+      if (!ownAnnotations) return;
+      const action = buildLibraryTypeTransform(library, ownAnnotations, cellTypeId, {
+        kind: "flip",
+        axis
+      });
+      if (action) void dispatcher.dispatch(action);
+    },
+    [ownAnnotations, library, dispatcher]
+  );
+
+  /** Drop an unmatched placeholder's unmatched status (right-click on its
+   *  row): it moves up into the matched list. */
+  const markCellTypeMatched = useCallback(
+    (cellTypeId: string) => {
+      const ct = annotations ? cellTypeById(annotations, cellTypeId) : null;
+      const action = ct ? buildMarkMatchedAction(ct) : null;
+      if (action) void dispatcher.dispatch(action);
+    },
+    [annotations, dispatcher]
+  );
+
   const jumpToDie = useCallback(
-    (target: Cell) => {
+    (target: Cell, remote?: RemoteInstance) => {
+      // An instance on another die opens that die, framed there.
+      const targetDie = remote?.dieId ?? dieId;
       const ct = annotations ? cellTypeById(annotations, target.cellTypeId) : null;
       if (ct) {
-        const rect = {
-          x: target.x,
-          y: target.y,
-          width: ct.cropRect.width || 64,
-          height: ct.cropRect.height || 64
-        };
+        const k = remote?.ratio ?? 1;
+        const fp = cellFootprint(target, {
+          cropRect: { x: 0, y: 0, width: ct.cropRect.width / k, height: ct.cropRect.height / k }
+        });
+        const rect = { ...fp, width: fp.width || 64, height: fp.height || 64 };
         const v = fitRectViewport(
           rect,
           Math.max(320, window.innerWidth - 568),
@@ -354,32 +455,40 @@ function RE({ dieId }: { dieId: string }) {
           80,
           4
         );
-        usePreferences.getState().saveViewport(dieId, v);
+        usePreferences.getState().saveViewport(targetDie, v);
       }
-      navigate(`/die/${dieId}`);
+      navigate(`/die/${targetDie}`);
     },
     [annotations, dieId, navigate]
   );
 
   // ── Clipboard (⌘C / ⌘V) ──────────────────────────────────────────
+  // Shared by every tab of the app (see `state/cellRE`), so shapes copied in
+  // one tab paste into any cell type of any die open in another.
   const doCopy = useCallback(() => {
     if (!cellType || selectedShapeIds.size === 0) return;
-    setClipboard(snapshotForClipboard(cellType, selectedShapeIds));
-  }, [cellType, selectedShapeIds, setClipboard]);
+    const items = snapshotForClipboard(cellType, selectedShapeIds);
+    if (items.length > 0) setClipboard({ dieId, cellTypeId: cellType.id, items });
+  }, [dieId, cellType, selectedShapeIds, setClipboard]);
 
   const doPaste = useCallback(() => {
-    if (!cellType || clipboard.length === 0) return;
+    if (!cellType || !clipboard) return;
+    const items = clipboard.items;
     // Default to pasting all into the active layer if it's a sensible target
     // (i.e. the active layer matches the source layer of every item), else
-    // each item lands back in its original layer. Either way new ids and an
-    // offset so the duplicates are obviously distinct from anything below.
+    // each item lands back in its original layer. Either way new ids. Back
+    // into the cell type they came from, the copies are offset so they're
+    // obviously distinct from the originals below; anywhere else (another
+    // type or die) they land in place, on the same spot of the cell.
+    const offset =
+      clipboard.dieId === dieId && clipboard.cellTypeId === cellType.id ? PASTE_OFFSET : 0;
     const uniformLayer =
-      clipboard.every((c) => c.layer === activeLayer) ? activeLayer : null;
+      items.every((c) => c.layer === activeLayer) ? activeLayer : null;
     // Group by destination layer.
     const byLayer = new Map<LayerType, LayerShape[]>();
-    for (const item of clipboard) {
+    for (const item of items) {
       const layer = uniformLayer ?? item.layer;
-      const shape = translateShape(item.shape, PASTE_OFFSET, PASTE_OFFSET);
+      const shape = translateShape(item.shape, offset, offset);
       let arr = byLayer.get(layer);
       if (!arr) {
         arr = [];
@@ -400,7 +509,7 @@ function RE({ dieId }: { dieId: string }) {
     if (actions.length === 1) void dispatcher.dispatch(actions[0]);
     else void dispatcher.dispatch({ kind: "batch", actions });
     setSelectedShapeIds(newKeys);
-  }, [cellType, clipboard, activeLayer, dispatcher, setSelectedShapeIds]);
+  }, [dieId, cellType, clipboard, activeLayer, dispatcher, setSelectedShapeIds]);
 
   // ── Shape-menu action handlers ────────────────────────────────────
   //
@@ -459,7 +568,7 @@ function RE({ dieId }: { dieId: string }) {
    *  includes it. Returns silently when every applicable shape already
    *  carries the requested label. */
   const doSetLabel = useCallback(
-    (target: ShapeContextMenuState, label: ShapeLabel | null) => {
+    (target: ShapeMenuAnchor, label: ShapeLabel | null) => {
       if (!cellType) return;
       const allowedLayers = labelLayersFor(target.layer);
       const targets: Array<{ layer: LayerType; id: string }> = [];
@@ -483,7 +592,7 @@ function RE({ dieId }: { dieId: string }) {
    *  handler but only ever touches diffusion shapes — the menu's
    *  forced-type group is gated to `layer === "diffusion"`. */
   const doSetForcedType = useCallback(
-    (target: ShapeContextMenuState, type: ForcedDiffusionType | null) => {
+    (target: ShapeMenuAnchor, type: ForcedDiffusionType | null) => {
       if (!cellType) return;
       const targets: Array<{ layer: LayerType; id: string }> = [];
       for (const key of selectedShapeIds) {
@@ -494,6 +603,35 @@ function RE({ dieId }: { dieId: string }) {
         targets.push({ layer: target.layer, id: target.shape.id });
       }
       const action = buildSetShapeForcedTypesAction(cellType, targets, type);
+      if (action) void dispatcher.dispatch(action);
+    },
+    [cellType, selectedShapeIds, dispatcher]
+  );
+
+  /** Quarter-turn the whole selection about the centre of its bounds; the
+   *  shapes keep their ids, so the selection stays put. */
+  const doRotateSelection = useCallback(
+    (deg: 90 | -90) => {
+      if (!cellType) return;
+      const action = buildRotateShapesAction(
+        cellType,
+        selectedShapes(cellType, selectedShapeIds),
+        deg
+      );
+      if (action) void dispatcher.dispatch(action);
+    },
+    [cellType, selectedShapeIds, dispatcher]
+  );
+
+  /** Mirror the whole selection across its bounds' centre line. */
+  const doFlipSelection = useCallback(
+    (axis: "h" | "v") => {
+      if (!cellType) return;
+      const action = buildFlipShapesAction(
+        cellType,
+        selectedShapes(cellType, selectedShapeIds),
+        axis
+      );
       if (action) void dispatcher.dispatch(action);
     },
     [cellType, selectedShapeIds, dispatcher]
@@ -546,15 +684,52 @@ function RE({ dieId }: { dieId: string }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [dispatcher, setActiveTool, doCopy, doPaste]);
 
+  /** The instance a context menu was opened on: this die's, or (with
+   *  `menu.dieId`) one on another die of the library. */
+  const menuTarget = (m: ReContextMenuState): { cell: Cell; remote: RemoteInstance | null } | null => {
+    if (m.dieId) {
+      const r = activeCellTypeId
+        ? remoteMembersOf(activeCellTypeId).find((x) => x.cell.id === m.cellId)
+        : undefined;
+      return r ? { cell: r.cell, remote: r } : null;
+    }
+    const c = annotations?.cells.find((x) => x.id === m.cellId);
+    return c ? { cell: c, remote: null } : null;
+  };
+
   // ── Status bar fragments ──────────────────────────────────────────
   const baseImageName = die?.originalFilename ?? die?.name ?? "base image";
-  // Prefer the specific instance crop (carries instance position / orientation
-  // metadata); fall back to the cell-type crop template when the type has no
-  // member instances yet (rare, but the page still needs imagery to draw on).
-  const imageUrl = cell
-    ? cellCropUrl(dieId, cell)
-    : cellType
-      ? cellTypeCropUrl(dieId, cellType.id)
+  // The canvas draws the instance's own pixels from the die's tile pyramid
+  // (position + orientation from the instance); the cell-type crop template
+  // only stands in when the type has no member instances yet (rare, but the
+  // page still needs imagery to draw on). …Unless the *type* row is what's
+  // selected (no explicit instance) and a clean specimen exists and is
+  // enabled: then show the per-pixel median of every instance, free of the
+  // wires and debris that sit on any single one. Clicking a specific
+  // instance always shows that instance's own pixels. The specimen is
+  // already canonical, so the canvas skips the orientation.
+  const cleanSpecimen =
+    useCleanSpecimens && cellType && activeCellId == null
+      ? (specimenIndex?.specimens.find(
+          (s) =>
+            s.cellTypeId === cellType.id &&
+            s.width === Math.round(cellType.cropRect.width) &&
+            s.height === Math.round(cellType.cropRect.height) &&
+            // Built before the type was flipped / turned: it would show
+            // mirrored or rotated under the annotations.
+            sameFrame(s.memberSignature, membersOf(annotations!, cellType.id))
+        ) ?? null)
+      : null;
+  // Another die's type not placed here yet: its image comes from that die.
+  const foreignImageUrl = useForeignTypeImageUrl(
+    library,
+    !cell && cellType ? cellType.id : null,
+    useCleanSpecimens
+  );
+  const imageUrl = cleanSpecimen
+    ? specimenImageUrl(dieId, cellType!.id, cleanSpecimen.createdAt)
+    : !cell && cellType
+      ? (foreignImageUrl ?? cellTypeCropUrl(dieId, cellType.id))
       : null;
   const cellInstanceCount = cellType
     ? membersOf(annotations!, cellType.id).length
@@ -565,7 +740,13 @@ function RE({ dieId }: { dieId: string }) {
       breadcrumb={die?.name ?? "RE cell"}
       meta={
         cellType
-          ? `re · ${cellType.name}${cell ? ` · cell ${cell.id.slice(0, 6)}` : ""}`
+          ? `re · ${cellType.name}${
+              cleanSpecimen
+                ? ` · median of ${cleanSpecimen.instancesUsed}`
+                : cell
+                  ? ` · cell ${cell.id.slice(0, 6)}${remoteCell ? ` on ${remoteCell.dieName}` : ""}`
+                  : ""
+            }`
           : "re"
       }
       onUndo={() => void dispatcher.undo()}
@@ -616,10 +797,26 @@ function RE({ dieId }: { dieId: string }) {
         {annotations ? (
           <CellRELeftPanel
             annotations={annotations}
-            onCellContextMenu={(c, x, y) => {
+            foreignTypes={library.foreign}
+            remoteMembersOf={remoteMembersOf}
+            onCellContextMenu={(c, x, y, onDieId) => {
+              // Unmatching an instance on another die would make a type
+              // there — do that on its own die.
               const canUnmatch =
-                membersOf(annotations, c.cellTypeId).length > 1;
-              setMenu({ x, y, cellId: c.id, canUnmatch });
+                !onDieId && membersOf(annotations, c.cellTypeId).length > 1;
+              setMenu({ x, y, cellId: c.id, canUnmatch, dieId: onDieId });
+            }}
+            onCellTypeContextMenu={(ct, x, y) => {
+              setTypeMenu({
+                x,
+                y,
+                cellTypeId: ct.id,
+                // Everywhere it's placed: a type-wide turn moves them all.
+                memberCount: ownAnnotations
+                  ? libraryMemberCount(library, ownAnnotations, ct.id)
+                  : 0,
+                unmatched: ct.matched !== true
+              });
             }}
           />
         ) : (
@@ -710,8 +907,21 @@ function RE({ dieId }: { dieId: string }) {
                 ref={canvasRef}
                 cellType={cellType}
                 cell={cell}
+                // An instance on another die: its die's tiles, at the ratio.
+                die={(remoteCell ? remoteDie : die) ?? null}
+                cellScale={remoteCell?.ratio ?? 1}
                 imageUrl={imageUrl}
-                annotations={annotations}
+                imageCanonical={cleanSpecimen !== null}
+                // The die overlay (wires / vias drawn on the die) belongs to
+                // one physical instance; over the type's median image it
+                // would point at pixels that aren't there.
+                annotations={
+                  cleanSpecimen
+                    ? undefined
+                    : remoteCell
+                      ? library.annotations.get(remoteCell.dieId)
+                      : annotations
+                }
                 extraction={extraction.data}
                 activeTool={activeTool}
                 activeLayer={activeLayer}
@@ -737,8 +947,9 @@ function RE({ dieId }: { dieId: string }) {
                     setShapeMenu(null);
                     return;
                   }
-                  setShapeMenu({ x, y, layer: target.layer, shape: target.shape });
+                  setShapeMenu({ x, y, anchor: { layer: target.layer, shape: target.shape } });
                 }}
+                onSelectionContextMenu={(x, y) => setShapeMenu({ x, y, anchor: null })}
                 onCanvasHover={setCanvasHover}
               />
             )
@@ -864,34 +1075,53 @@ function RE({ dieId }: { dieId: string }) {
           menu={menu}
           onClose={() => setMenu(null)}
           onFlipH={() => {
-            const c = annotations.cells.find((x) => x.id === menu.cellId);
-            if (c) orient(c, { flippedH: !(c.flippedH === true) });
+            const t = menuTarget(menu);
+            if (t) orient(t.cell, { flippedH: !(t.cell.flippedH === true) }, t.remote?.dieId);
           }}
           onFlipV={() => {
-            const c = annotations.cells.find((x) => x.id === menu.cellId);
-            if (c) orient(c, { flippedV: !(c.flippedV === true) });
+            const t = menuTarget(menu);
+            if (t) orient(t.cell, { flippedV: !(t.cell.flippedV === true) }, t.remote?.dieId);
           }}
           onRotate={() => {
-            const c = annotations.cells.find((x) => x.id === menu.cellId);
-            if (c) orient(c, { rotation: rotateCw((c.rotation ?? 0) as 0) });
+            const t = menuTarget(menu);
+            if (t) orient(t.cell, { rotation: rotateView(orientOf(t.cell), 90).rotation }, t.remote?.dieId);
           }}
           onUnmatch={() => {
-            const c = annotations.cells.find((x) => x.id === menu.cellId);
-            if (c) doUnmatch(c);
+            const t = menuTarget(menu);
+            if (t && !t.remote) doUnmatch(t.cell);
           }}
           onJumpToDie={() => {
-            const c = annotations.cells.find((x) => x.id === menu.cellId);
-            if (c) jumpToDie(c);
+            const t = menuTarget(menu);
+            if (t) jumpToDie(t.cell, t.remote ?? undefined);
           }}
+        />
+      )}
+
+      {typeMenu && (
+        <CellTypeContextMenu
+          menu={typeMenu}
+          onClose={() => setTypeMenu(null)}
+          onRotate={(deg) => rotateCellType(typeMenu.cellTypeId, deg)}
+          onFlip={(axis) => flipCellType(typeMenu.cellTypeId, axis)}
+          onMarkMatched={() => markCellTypeMatched(typeMenu.cellTypeId)}
         />
       )}
 
       {shapeMenu && cellType && (() => {
         // Compute the multi-select aggregates the menu needs: how many
         // shapes each action touches and the current label / forced-type
-        // they all share (or "mixed").
-        const labels = summarizeLabels(cellType, selectedShapeIds, shapeMenu);
-        const forced = summarizeForcedTypes(cellType, selectedShapeIds, shapeMenu);
+        // they all share (or "mixed"). Opened on the group box there's no
+        // anchor shape, and no label / diffusion-type section to feed.
+        const anchor = shapeMenu.anchor;
+        const labels = anchor
+          ? summarizeLabels(cellType, selectedShapeIds, anchor)
+          : { count: 0, applied: null };
+        const forced = anchor
+          ? summarizeForcedTypes(cellType, selectedShapeIds, anchor)
+          : { count: 0, applied: null };
+        // Transform items grey out when they'd change nothing (a lone point,
+        // a lone rect for a flip, a lone square for a turn).
+        const items = selectedShapes(cellType, selectedShapeIds);
         return (
           <ShapeContextMenu
             menu={shapeMenu}
@@ -900,13 +1130,22 @@ function RE({ dieId }: { dieId: string }) {
             appliedLabel={labels.applied}
             forcedTypeTargetCount={forced.count}
             appliedForcedType={forced.applied}
-            hasClipboard={clipboard.length > 0}
+            hasClipboard={clipboard != null}
+            canRotate={buildRotateShapesAction(cellType, items, 90) != null}
+            canFlipH={buildFlipShapesAction(cellType, items, "h") != null}
+            canFlipV={buildFlipShapesAction(cellType, items, "v") != null}
             onClose={() => setShapeMenu(null)}
-            onSetLabel={(label) => doSetLabel(shapeMenu, label)}
-            onSetForcedType={(type) => doSetForcedType(shapeMenu, type)}
+            onSetLabel={(label) => {
+              if (anchor) doSetLabel(anchor, label);
+            }}
+            onSetForcedType={(type) => {
+              if (anchor) doSetForcedType(anchor, type);
+            }}
             onDuplicate={doDuplicate}
             onCopy={doCopy}
             onPaste={doPaste}
+            onRotate={doRotateSelection}
+            onFlip={doFlipSelection}
             onDelete={doDelete}
           />
         );
@@ -1015,7 +1254,7 @@ function labelLayersFor(anchorLayer: LayerType): Set<LayerType> {
 function summarizeLabels(
   cellType: CellType,
   selectedShapeIds: Set<string>,
-  menu: ShapeContextMenuState
+  menu: ShapeMenuAnchor
 ): { count: number; applied: AppliedLabel } {
   const allowed = labelLayersFor(menu.layer);
   const labels: Array<ShapeLabel | null> = [];
@@ -1045,7 +1284,7 @@ function summarizeLabels(
 function summarizeForcedTypes(
   cellType: CellType,
   selectedShapeIds: Set<string>,
-  menu: ShapeContextMenuState
+  menu: ShapeMenuAnchor
 ): { count: number; applied: AppliedForcedType } {
   const types: Array<ForcedDiffusionType | null> = [];
   for (const key of selectedShapeIds) {

@@ -1,6 +1,8 @@
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type {
+  AnnotationBatchOp,
+  AnnotationBatchRequest,
   AnnotationNet,
   Cell,
   CellType,
@@ -13,7 +15,7 @@ import type {
 } from "shared";
 import type { NetChange } from "../lib/netGraph";
 import { annotationKeys, removeById, upsertById } from "./annotations";
-import { apiDelete, apiPut } from "./client";
+import { apiDelete, apiPost, apiPut } from "./client";
 import { useDieViewerStore } from "../state/dieViewer";
 
 // ── Action union ─────────────────────────────────────────────────────
@@ -61,7 +63,11 @@ export type AnnotationAction =
   | { kind: "removeGuide"; guide: Guide }
   // One user gesture that touches several nets atomically (cross-net merge,
   // graph-splitting delete). Applied/persisted in order; undone in reverse.
-  | { kind: "batch"; actions: AnnotationAction[] };
+  | { kind: "batch"; actions: AnnotationAction[] }
+  // Part of a gesture that lands on another die: a cell type shared through
+  // the cell library lives in — and is written to — the die that owns it.
+  // Applied, persisted and undone against that die.
+  | { kind: "onDie"; dieId: string; action: AnnotationAction };
 
 export function inverseOf(action: AnnotationAction): AnnotationAction {
   switch (action.kind) {
@@ -133,6 +139,8 @@ export function inverseOf(action: AnnotationAction): AnnotationAction {
       return { kind: "upsertGuide", guide: action.guide, prevGuide: null };
     case "batch":
       return { kind: "batch", actions: [...action.actions].reverse().map(inverseOf) };
+    case "onDie":
+      return { kind: "onDie", dieId: action.dieId, action: inverseOf(action.action) };
   }
 }
 
@@ -226,6 +234,9 @@ export function applyAction(annotations: DieAnnotations, action: AnnotationActio
       };
     case "batch":
       return action.actions.reduce(applyAction, annotations);
+    case "onDie":
+      // Another die's share of the gesture — not part of this snapshot.
+      return annotations;
   }
 }
 
@@ -281,12 +292,111 @@ export async function requestAction(
     case "removeGuide":
       return apiDelete(`/api/dies/${dieId}/guides/${action.guide.id}`);
     case "batch": {
-      // Persist sub-actions in order; report the final revision.
-      let result: { ok: true; rev: number } = { ok: true, rev: 0 };
-      for (const sub of action.actions) result = await requestAction(dieId, sub);
-      return result;
+      // One atomic request: the server applies every sub-action in order
+      // under a single write and revision, so a large batch (e.g. turning a
+      // type with hundreds of instances) lands at once — never half-applied.
+      const ops = batchOps(action);
+      if (ops.length === 0) return { ok: true, rev: 0 };
+      return apiPost(`/api/dies/${dieId}/batch`, { ops } satisfies AnnotationBatchRequest);
     }
+    case "onDie":
+      return requestAction(action.dieId, action.action);
   }
+}
+
+/**
+ * A gesture's edits grouped by the die they land on — `home` for everything
+ * not wrapped in `onDie` — each die's share one action (a batch when it has
+ * several), in application order.
+ */
+export function splitByDie(home: string, action: AnnotationAction): Map<string, AnnotationAction> {
+  const parts = new Map<string, AnnotationAction[]>();
+  const visit = (a: AnnotationAction, dieId: string): void => {
+    if (a.kind === "batch") {
+      for (const sub of a.actions) visit(sub, dieId);
+      return;
+    }
+    if (a.kind === "onDie") {
+      visit(a.action, a.dieId);
+      return;
+    }
+    const list = parts.get(dieId);
+    if (list) list.push(a);
+    else parts.set(dieId, [a]);
+  };
+  visit(action, home);
+  const out = new Map<string, AnnotationAction>();
+  for (const [dieId, list] of parts) {
+    out.set(dieId, list.length === 1 ? list[0] : { kind: "batch", actions: list });
+  }
+  return out;
+}
+
+/** Flatten a (possibly nested) batch into the server's whole-entity writes,
+ *  in application order. */
+export function batchOps(action: AnnotationAction): AnnotationBatchOp[] {
+  const ops: AnnotationBatchOp[] = [];
+  const visit = (a: AnnotationAction): void => {
+    switch (a.kind) {
+      case "batch":
+        a.actions.forEach(visit);
+        return;
+      case "onDie":
+        // Persisted against its own die (see `splitByDie`).
+        return;
+      case "upsertNet":
+        ops.push({ op: "upsert", collection: "nets", item: a.net });
+        return;
+      case "removeNet":
+        ops.push({ op: "remove", collection: "nets", id: a.net.id });
+        return;
+      case "upsertCell":
+        ops.push({ op: "upsert", collection: "cells", item: a.cell });
+        return;
+      case "removeCell":
+        ops.push({ op: "remove", collection: "cells", id: a.cell.id });
+        return;
+      case "upsertCellType":
+        ops.push({ op: "upsert", collection: "cellTypes", item: a.cellType });
+        return;
+      case "removeCellType":
+        ops.push({ op: "remove", collection: "cellTypes", id: a.cellType.id });
+        return;
+      case "addPin":
+      case "upsertPin":
+        ops.push({ op: "upsert", collection: "pins", item: a.pin });
+        return;
+      case "removePin":
+        ops.push({ op: "remove", collection: "pins", id: a.pin.id });
+        return;
+      case "upsertAnnotation":
+        ops.push({ op: "upsert", collection: "annotations", item: a.annotation });
+        return;
+      case "removeAnnotation":
+        ops.push({ op: "remove", collection: "annotations", id: a.annotation.id });
+        return;
+      case "upsertRoi":
+        ops.push({ op: "upsert", collection: "rois", item: a.roi });
+        return;
+      case "removeRoi":
+        ops.push({ op: "remove", collection: "rois", id: a.roi.id });
+        return;
+      case "upsertIgnore":
+        ops.push({ op: "upsert", collection: "ignores", item: a.ignore });
+        return;
+      case "removeIgnore":
+        ops.push({ op: "remove", collection: "ignores", id: a.ignore.id });
+        return;
+      case "upsertGuide":
+        ops.push({ op: "upsert", collection: "guides", item: a.guide });
+        return;
+      case "removeGuide":
+        ops.push({ op: "remove", collection: "guides", id: a.guide.id });
+        return;
+    }
+  };
+  visit(action);
+  return ops;
 }
 
 // ── Dispatcher ───────────────────────────────────────────────────────
@@ -304,16 +414,33 @@ export interface ActionDispatcher {
   canRedo: boolean;
 }
 
+export interface ActionDispatcherOptions {
+  /** Rewrites each dispatched action before it's applied and recorded (the
+   *  cell library sends edits of another die's type to that die). Null
+   *  drops the action. */
+  route?: (action: AnnotationAction) => AnnotationAction | null;
+}
+
 /**
  * One dispatcher per die. Dispatching is the only way to mutate annotations;
  * persistence happens automatically (optimistic cache update → server call
- * → rollback on error → invalidate on settled).
+ * → rollback on error → invalidate on settled). Parts wrapped in `onDie` go
+ * to their own die the same way.
  */
-export function useActionDispatcher(dieId: string): ActionDispatcher {
+export function useActionDispatcher(
+  dieId: string,
+  options: ActionDispatcherOptions = {}
+): ActionDispatcher {
   const qc = useQueryClient();
+  const routeRef = useRef(options.route);
+  routeRef.current = options.route;
 
+  // The undo history is global; it's this die's only while it holds this
+  // die's edits (see `claimHistory`).
+  const ownsHistory = useDieViewerStore((s) => s.historyDieId === dieId);
   const undoStack = useDieViewerStore((s) => s.undoStack);
   const redoStack = useDieViewerStore((s) => s.redoStack);
+  const claimHistory = useDieViewerStore((s) => s.claimHistory);
   const pushUndo = useDieViewerStore((s) => s.pushUndo);
   const popUndo = useDieViewerStore((s) => s.popUndo);
   const pushRedo = useDieViewerStore((s) => s.pushRedo);
@@ -322,25 +449,31 @@ export function useActionDispatcher(dieId: string): ActionDispatcher {
 
   const apply = useCallback(
     async (action: AnnotationAction): Promise<boolean> => {
-      const key = annotationKeys.forDie(dieId);
-      await qc.cancelQueries({ queryKey: key });
-      const previous = qc.getQueryData<DieAnnotations>(key);
-      if (previous) {
-        qc.setQueryData<DieAnnotations>(key, applyAction(previous, action));
+      const parts = splitByDie(dieId, action);
+      const snapshots: Array<{ key: readonly unknown[]; previous: DieAnnotations | undefined }> = [];
+      for (const [partDie, part] of parts) {
+        const key = annotationKeys.forDie(partDie);
+        await qc.cancelQueries({ queryKey: key });
+        const previous = qc.getQueryData<DieAnnotations>(key);
+        snapshots.push({ key, previous });
+        if (previous) qc.setQueryData<DieAnnotations>(key, applyAction(previous, part));
       }
       try {
-        await requestAction(dieId, action);
+        // Each die's share is one atomic request.
+        await Promise.all([...parts].map(([partDie, part]) => requestAction(partDie, part)));
         return true;
       } catch (error) {
         // Rollback the optimistic update.
-        if (previous) qc.setQueryData(key, previous);
+        for (const { key, previous } of snapshots) {
+          if (previous) qc.setQueryData(key, previous);
+        }
         console.warn(`[action] ${action.kind} failed`, error);
         return false;
       } finally {
         // Safety net: server is authoritative. The WS notification usually
         // beats this, but invalidating here guarantees eventual consistency
         // even if the socket dropped.
-        void qc.invalidateQueries({ queryKey: key });
+        for (const { key } of snapshots) void qc.invalidateQueries({ queryKey: key });
       }
     },
     [qc, dieId]
@@ -348,34 +481,40 @@ export function useActionDispatcher(dieId: string): ActionDispatcher {
 
   const dispatch = useCallback<ActionDispatcher["dispatch"]>(
     async (action) => {
-      const ok = await apply(action);
+      const route = routeRef.current;
+      const routed = route ? route(action) : action;
+      if (!routed) return;
+      const ok = await apply(routed);
       if (!ok) return;
-      pushUndo(action);
+      claimHistory(dieId);
+      pushUndo(routed);
       clearRedo();
     },
-    [apply, pushUndo, clearRedo]
+    [apply, claimHistory, dieId, pushUndo, clearRedo]
   );
 
   const undo = useCallback<ActionDispatcher["undo"]>(async () => {
+    if (useDieViewerStore.getState().historyDieId !== dieId) return;
     const action = popUndo();
     if (!action) return;
     const ok = await apply(inverseOf(action));
     if (ok) pushRedo(action);
     // best-effort: on failure the action is already off the stack.
-  }, [apply, popUndo, pushRedo]);
+  }, [apply, dieId, popUndo, pushRedo]);
 
   const redo = useCallback<ActionDispatcher["redo"]>(async () => {
+    if (useDieViewerStore.getState().historyDieId !== dieId) return;
     const action = popRedo();
     if (!action) return;
     const ok = await apply(action);
     if (ok) pushUndo(action);
-  }, [apply, popRedo, pushUndo]);
+  }, [apply, dieId, popRedo, pushUndo]);
 
   return {
     dispatch,
     undo,
     redo,
-    canUndo: undoStack.length > 0,
-    canRedo: redoStack.length > 0
+    canUndo: ownsHistory && undoStack.length > 0,
+    canRedo: ownsHistory && redoStack.length > 0
   };
 }

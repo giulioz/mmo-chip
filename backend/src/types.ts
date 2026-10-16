@@ -30,6 +30,10 @@ export interface DieRecord {
   levels: import("shared").DieLevelMetadata[];
   createdAt: string;
   updatedAt: string;
+  /** See `DieSummary.cellLibrary`. */
+  cellLibrary?: string;
+  /** See `DieSummary.cellScale`. */
+  cellScale?: number;
 }
 
 export interface DieIndex {

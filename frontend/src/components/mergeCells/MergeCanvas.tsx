@@ -8,21 +8,48 @@ import {
   forwardRef,
   type CSSProperties
 } from "react";
-import type { Cell, CellType, MLPrediction } from "shared";
+import type { Cell, CellType, DieMetadata, MLPrediction } from "shared";
 import { drawCellLayers } from "../../renderer/annotations/shapes";
 import { COLOR_VIA, COLOR_VIA_FILL } from "../../renderer/annotations/style";
+import { enterCellDieFrame } from "../../renderer/annotations/cellFrame";
+import { dieRegion } from "../../renderer/dieRegion";
 import type { TileBounds } from "../../renderer/types";
-import { orientOf } from "../../lib/mergeCells";
+import { cellFootprint } from "../../lib/cellDetection";
+import { applyOrientation } from "../../lib/geometry";
+import { orientOf, type Orient } from "../../lib/mergeCells";
+
+/** A whole cell type shown lined up in another type's box (merging two
+ *  types): its canonical content — `imageUrl`, else an instance's pixels —
+ *  mapped into the view's box by `orient` about the two boxes' centres, then
+ *  shifted by (dx, dy). All in this die's pixels. */
+export interface TypeAlignView {
+  cellType: CellType;
+  orient: Orient;
+  dx: number;
+  dy: number;
+  /** An instance to take the pixels from, on `die` — whose pixels are
+   *  1/`scale` of this die's. */
+  member: { cell: Cell; die: DieMetadata; scale: number } | null;
+  /** Its pixels come from another die: corner handles scale it (which
+   *  sets this die's scale — see `onScaleCandidate`). */
+  scalable?: boolean;
+}
 
 export interface CellView {
   cell: Cell | null;
   cellType: CellType | null;
+  /** A canonical image shown instead of the instance's own pixels (which
+   *  come from the die's tile pyramid): the type's clean specimen, or its
+   *  template crop when there's no instance. Overlays still follow `cell`. */
   imageUrl: string | null;
   /** ML via predictions for this cell's die bbox. Drawn as small markers
    *  inside the same orientation transform as the image so they stay pinned
    *  to image features (and move with a live drag-align). Null/absent ⇒
    *  no overlay (either disabled or not loaded yet). */
   mlVias?: MLPrediction | null;
+  /** Set for a whole-type candidate: drawn lined up in `cellType`'s box (the
+   *  specimen's) instead of as an instance. */
+  align?: TypeAlignView;
 }
 
 export interface MergeCanvasHandle {
@@ -49,11 +76,22 @@ interface Props {
   showMlVias: boolean;
   specimen: CellView | null;
   candidate: CellView | null;
+  /** The die's tile pyramid, which instances' pixels are drawn from. */
+  die: DieMetadata | null;
   /** Commit a drag-align: source-pixel delta to apply to the candidate x/y. */
   onAlign: (dxSrc: number, dySrc: number) => void;
+  /** Commit a drag-align of a whole-type candidate: the shift in the
+   *  specimen's canonical frame. */
+  onAlignCanonical?: (dx: number, dy: number) => void;
+  /** Commit a corner drag of a scalable type candidate: the factor its size
+   *  should change by (about its centre). */
+  onScaleCandidate?: (factor: number) => void;
 }
 
 const GAP = 24; // world-unit gap between the two boxes in side-by-side
+/** Scale-handle size / grab radius, css px. */
+const HANDLE_PX = 8;
+const HANDLE_GRAB_PX = 10;
 /** Matches the die viewer (useCanvasGestures) so trackpad zoom feels the same
  *  — the old 0.0015 was ~7× too slow. */
 const WHEEL_ZOOM_FACTOR = 0.01;
@@ -110,7 +148,18 @@ function contentExtent(
 }
 
 export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCanvas(
-  { mode, opacity, showAnno, showMlVias, specimen, candidate, onAlign },
+  {
+    mode,
+    opacity,
+    showAnno,
+    showMlVias,
+    specimen,
+    candidate,
+    die,
+    onAlign,
+    onAlignCanonical,
+    onScaleCandidate
+  },
   ref
 ) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -121,22 +170,87 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
   const viewRef = useRef<View>({ ox: 0, oy: 0, zoom: 1 });
   const sizeRef = useRef({ w: 1, h: 1 });
   const dragRef = useRef<{
-    kind: "pan" | "align";
+    kind: "pan" | "align" | "scale";
     sx: number;
     sy: number;
     startOx: number;
     startOy: number;
     dx: number;
     dy: number;
+    /** Scale drags: the candidate's centre and the grabbed corner (canvas css
+     *  px), and the live factor. */
+    centre?: { x: number; y: number };
+    corner?: { x: number; y: number };
+    factor?: number;
   } | null>(null);
+  const [overHandle, setOverHandle] = useState<null | "nwse" | "nesw">(null);
   const spaceRef = useRef(false);
   const [, force] = useState(0);
   const redraw = useCallback(() => force((n) => n + 1), []);
 
   // Latest props mirrored into a ref so the canvas callbacks/effects can stay
   // referentially stable (no ResizeObserver churn during a pan/align drag).
-  const propsRef = useRef({ mode, opacity, showAnno, showMlVias, specimen, candidate, onAlign });
-  propsRef.current = { mode, opacity, showAnno, showMlVias, specimen, candidate, onAlign };
+  const propsRef = useRef({
+    mode,
+    opacity,
+    showAnno,
+    showMlVias,
+    specimen,
+    candidate,
+    onAlign,
+    onAlignCanonical,
+    onScaleCandidate
+  });
+  propsRef.current = {
+    mode,
+    opacity,
+    showAnno,
+    showMlVias,
+    specimen,
+    candidate,
+    onAlign,
+    onAlignCanonical,
+    onScaleCandidate
+  };
+
+  /** A scalable type candidate's box on screen (canvas css px) in the single-
+   *  view modes — its centre and corners — else null. */
+  const scalableBox = useCallback((): {
+    centre: { x: number; y: number };
+    corners: Array<{ x: number; y: number }>;
+  } | null => {
+    const p = propsRef.current;
+    const a = p.candidate?.align;
+    if (!a?.scalable || p.mode === "sxs" || p.mode === "specimen") return null;
+    const sp = boxOf(p.specimen);
+    const cd = boxOf(p.candidate);
+    if (!cd) return null;
+    const ext = contentExtent(p.mode, sp, cd);
+    const v = viewRef.current;
+    const quarter = a.orient.rotation === 90 || a.orient.rotation === 270;
+    const hw = (quarter ? a.cellType.cropRect.height : a.cellType.cropRect.width) / 2;
+    const hh = (quarter ? a.cellType.cropRect.width : a.cellType.cropRect.height) / 2;
+    const wx = (ext.w - cd.w) / 2 + cd.w / 2 + a.dx;
+    const wy = (ext.h - cd.h) / 2 + cd.h / 2 + a.dy;
+    const at = (x: number, y: number) => ({ x: (x - v.ox) * v.zoom, y: (y - v.oy) * v.zoom });
+    return {
+      centre: at(wx, wy),
+      corners: [at(wx - hw, wy - hh), at(wx + hw, wy - hh), at(wx + hw, wy + hh), at(wx - hw, wy + hh)]
+    };
+  }, []);
+  const handleAt = useCallback(
+    (x: number, y: number) => {
+      const box = scalableBox();
+      if (!box) return null;
+      const i = box.corners.findIndex(
+        (c) => Math.abs(c.x - x) <= HANDLE_GRAB_PX && Math.abs(c.y - y) <= HANDLE_GRAB_PX
+      );
+      return i < 0
+        ? null
+        : { centre: box.centre, corner: box.corners[i], cursor: i % 2 === 0 ? ("nwse" as const) : ("nesw" as const) };
+    },
+    [scalableBox]
+  );
 
   // ── Image cache ────────────────────────────────────────────────────
   const imgCache = useRef(new Map<string, HTMLImageElement>());
@@ -157,67 +271,19 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
     [redraw]
   );
 
-  // Last successfully-loaded image per cell id + a "pending visual offset"
-  // (canonical px) accumulated by drag-align commits that haven't yet been
-  // mirrored by a fresh crop from the backend. After a release the new
-  // `cellCropUrl` changes (the URL embeds `cell.x / cell.y` so the browser
-  // cache busts when the bbox moves) and there's a 0.5–2 s gap before the
-  // server returns a fresh JPG. Without this we'd paint blank during the
-  // gap; with just the image fallback we'd paint the *un-dragged* old
-  // image at the original position — misleading. So we stash the canonical
-  // drag delta too and translate the fallback image by it: the user sees
-  // the cell sitting at the position they dragged it to, then content
-  // silently swaps when the new crop arrives (which visually has the same
-  // features at the same place, just sourced from the new bbox).
-  //
-  // Keyed by cell id (not URL): switching to a different candidate gives
-  // us no fallback for the new one (correct — we shouldn't show old cell
-  // pixels in a new cell's slot). Capped to keep the map bounded over
-  // long sessions; Map's insertion-order semantics give us a cheap LRU.
-  interface CellImgState {
-    img: HTMLImageElement;
-    /** Canvas-coord canonical offset to add when drawing this image as a
-     *  fallback. Cleared whenever a fresh image for this cell loads. */
-    pendingOffset: { dx: number; dy: number };
-  }
-  const lastImgByCellRef = useRef<Map<string, CellImgState>>(new Map());
-  const LAST_IMG_CAP = 32;
-  const resolveImg = useCallback(
-    (
-      view: CellView
-    ): { img: HTMLImageElement | null; offset: { dx: number; dy: number } } => {
-      const cellId = view.cell?.id ?? null;
-      const fresh = getImage(view.imageUrl);
-      if (fresh && cellId) {
-        const map = lastImgByCellRef.current;
-        const existing = map.get(cellId);
-        // Only re-stamp the entry (and clear `pendingOffset`) when the
-        // *image identity* changes — i.e. a genuinely new crop just loaded.
-        // Renders that hit a cached same-URL image must NOT touch the
-        // pending offset: drag-release fires a sync re-render *before* the
-        // optimistic cellType update lands, so this render still sees the
-        // old URL — we'd otherwise wipe the drag delta we just stashed and
-        // the cell would snap back to its original position for one frame.
-        if (!existing || existing.img !== fresh) {
-          if (existing) map.delete(cellId);
-          map.set(cellId, { img: fresh, pendingOffset: { dx: 0, dy: 0 } });
-          while (map.size > LAST_IMG_CAP) {
-            const oldest = map.keys().next().value;
-            if (oldest === undefined) break;
-            map.delete(oldest);
-          }
-          return { img: fresh, offset: { dx: 0, dy: 0 } };
-        }
-        return { img: existing.img, offset: existing.pendingOffset };
-      }
-      if (cellId) {
-        const state = lastImgByCellRef.current.get(cellId);
-        if (state) return { img: state.img, offset: state.pendingOffset };
-      }
-      return { img: null, offset: { dx: 0, dy: 0 } };
-    },
-    [getImage]
-  );
+  // A released align drag keeps showing its offset (canonical px) until the
+  // candidate's new position arrives — the dispatch lands a moment after the
+  // pointer-up redraw, and without this the cell would flick back to where
+  // it was for a frame or two. Dropped as soon as the position changes (or
+  // after a few seconds, should the edit never land).
+  const settlingRef = useRef<{
+    cellId: string;
+    x: number;
+    y: number;
+    dx: number;
+    dy: number;
+    until: number;
+  } | null>(null);
 
   // CSS-x offset of the pane the cursor is over (0 unless side-by-side and
   // over the right half) — used to anchor cursor-centred zoom correctly.
@@ -275,10 +341,15 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
     }
   }));
 
-  // Re-fit when the content identity or mode changes (stable string key).
+  // Re-fit when the content identity, a box's shape (a type turned a
+  // quarter turn) or the mode changes (stable string key).
+  const sizeKey = (v: CellView | null) => {
+    const b = boxOf(v);
+    return b ? `${b.w}x${b.h}` : "-";
+  };
   const fitKey = `${mode}|${specimen?.cell?.id ?? specimen?.cellType?.id ?? "-"}|${
     candidate?.cell?.id ?? "-"
-  }`;
+  }|${sizeKey(specimen)}|${sizeKey(candidate)}`;
   const fitKeyRef = useRef("");
   useEffect(() => {
     if (fitKey !== fitKeyRef.current) {
@@ -360,36 +431,111 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
       );
     };
 
+    /** A whole-type candidate, lined up in the specimen's `box`. */
+    const drawAligned = (
+      view: CellView,
+      a: TypeAlignView,
+      box: { w: number; h: number },
+      originX: number,
+      originY: number,
+      alpha: number,
+      live: { dx: number; dy: number; scale?: number },
+      zoom: number,
+      composite: GlobalCompositeOperation
+    ) => {
+      const cw = a.cellType.cropRect.width;
+      const ch = a.cellType.cropRect.height;
+      const img = getImage(view.imageUrl);
+      const m = a.member;
+      // The instance's footprint on its own die, in that die's pixels.
+      const region =
+        !img && m
+          ? dieRegion(
+              m.die,
+              cellFootprint(m.cell, { cropRect: { x: 0, y: 0, width: cw / m.scale, height: ch / m.scale } }),
+              zoom * dpr * m.scale,
+              redraw
+            )
+          : null;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(originX + live.dx, originY + live.dy);
+      ctx.globalCompositeOperation = composite;
+      ctx.imageSmoothingEnabled = zoom < 3;
+      // Specimen frame → the candidate's canonical frame.
+      ctx.translate(box.w / 2 + a.dx, box.h / 2 + a.dy);
+      ctx.rotate((a.orient.rotation * Math.PI) / 180);
+      ctx.scale(a.orient.flippedH ? -1 : 1, a.orient.flippedV ? -1 : 1);
+      // A corner drag in flight scales it about its centre.
+      if (live.scale) ctx.scale(live.scale, live.scale);
+      ctx.translate(-cw / 2, -ch / 2);
+      if (img) {
+        ctx.drawImage(img, 0, 0, cw, ch);
+      } else if (region && m) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, cw, ch);
+        ctx.clip();
+        ctx.scale(m.scale, m.scale);
+        enterCellDieFrame(ctx, m.cell, cw / m.scale, ch / m.scale);
+        const r = region.rect;
+        ctx.drawImage(region.canvas, r.x, r.y, r.width, r.height);
+        ctx.restore();
+      } else if (composite === "source-over") {
+        ctx.fillStyle = "rgba(255,255,255,0.04)";
+        ctx.fillRect(0, 0, cw, ch);
+      }
+      ctx.globalCompositeOperation = "source-over";
+      if (showAnno) drawCellLayers(ctx, a.cellType.layers, mkBounds(zoom), { outline: false });
+      // Its own box, dashed (the specimen's gets the usual outline).
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = "rgba(127,178,255,0.75)";
+      ctx.lineWidth = 1 / zoom;
+      ctx.setLineDash([4 / zoom, 3 / zoom]);
+      ctx.strokeRect(0, 0, cw, ch);
+      ctx.restore();
+    };
+
     const drawCell = (
       view: CellView,
       box: { w: number; h: number },
       originX: number,
       originY: number,
       alpha: number,
-      live: { dx: number; dy: number },
+      live: { dx: number; dy: number; scale?: number },
       zoom: number,
       composite: GlobalCompositeOperation = "source-over"
     ) => {
-      const { img, offset: pendingOffset } = resolveImg(view);
-      const o = view.cell ? orientOf(view.cell) : { flippedH: false, flippedV: false, rotation: 0 as const };
-      // `pendingOffset` is the canonical-canvas delta accumulated by a
-      // drag-align commit whose fresh crop hasn't arrived yet. Composed
-      // additively with the in-progress `live` offset so the user sees the
-      // cell at exactly the position they dragged it to throughout the
-      // commit → load → swap cycle.
-      const effDx = live.dx + pendingOffset.dx;
-      const effDy = live.dy + pendingOffset.dy;
-      const cx = originX + effDx + box.w / 2;
-      const cy = originY + effDy + box.h / 2;
+      if (view.align) {
+        drawAligned(view, view.align, box, originX, originY, alpha, live, zoom, composite);
+        return;
+      }
+      // A URL image is canonical already (clean specimen, or the type's
+      // template when there's no instance); otherwise the instance's pixels
+      // come straight from the die's tile pyramid at the level the zoom
+      // needs, seen through its orientation and clipped to the box — one
+      // composed image, so alpha / "difference" apply to it as a whole.
+      const img = getImage(view.imageUrl);
+      const region =
+        !view.imageUrl && view.cell && view.cellType && die
+          ? dieRegion(die, cellFootprint(view.cell, view.cellType), zoom * dpr, redraw)
+          : null;
       ctx.save();
       ctx.globalAlpha = alpha;
-      ctx.translate(cx, cy);
-      ctx.rotate((o.rotation * Math.PI) / 180);
-      ctx.scale(o.flippedH ? -1 : 1, o.flippedV ? -1 : 1);
-      ctx.translate(-box.w / 2, -box.h / 2);
+      // The cell's canonical frame: origin at its box's top-left.
+      ctx.translate(originX + live.dx, originY + live.dy);
       ctx.globalCompositeOperation = composite;
-      if (img) {
-        ctx.imageSmoothingEnabled = zoom < 3;
+      ctx.imageSmoothingEnabled = zoom < 3;
+      if (region && view.cell) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, box.w, box.h);
+        ctx.clip();
+        enterCellDieFrame(ctx, view.cell, box.w, box.h);
+        const r = region.rect;
+        ctx.drawImage(region.canvas, r.x, r.y, r.width, r.height);
+        ctx.restore();
+      } else if (img) {
         ctx.drawImage(img, 0, 0, box.w, box.h);
       } else if (composite === "source-over") {
         ctx.fillStyle = "rgba(255,255,255,0.04)";
@@ -405,11 +551,14 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
           outline: false
         });
       }
-      // ML via overlay. Drawn in die-coord space (translated so the cell's
-      // die origin sits at the local frame's origin) so vias stay pinned to
-      // the underlying image features and visibly move with a live drag.
+      // ML via overlay. Drawn in die coordinates through the same frame as
+      // the crop so vias stay pinned to the underlying image features and
+      // visibly move with a live drag.
       if (showMlVias && view.mlVias && view.cell) {
-        drawMlVias(ctx, view.mlVias, view.cell.x, view.cell.y, zoom);
+        ctx.save();
+        enterCellDieFrame(ctx, view.cell, box.w, box.h);
+        drawMlVias(ctx, view.mlVias, zoom);
+        ctx.restore();
       }
       // Box outline.
       ctx.globalAlpha = 1;
@@ -456,13 +605,27 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
       // disagree); specimen / candidate draw just one.
       const v = viewRef.current;
       setWorld(v, 0);
+      // The candidate's in-flight offset: the live align drag, or a released
+      // one still waiting for its new position to land.
+      const settling = settlingRef.current;
+      const cc = candidate?.cell;
+      const settled =
+        !settling ||
+        !cc ||
+        cc.id !== settling.cellId ||
+        cc.x !== settling.x ||
+        cc.y !== settling.y ||
+        performance.now() > settling.until;
+      if (settled) settlingRef.current = null;
+      const pending = !settled && settling ? settling : { dx: 0, dy: 0 };
+      const drag = dragRef.current;
       const live =
-        dragRef.current && dragRef.current.kind === "align"
+        drag && drag.kind === "align"
           ? {
-              dx: dragRef.current.dx / v.zoom,
-              dy: dragRef.current.dy / v.zoom
+              dx: drag.dx / v.zoom + pending.dx,
+              dy: drag.dy / v.zoom + pending.dy
             }
-          : { dx: 0, dy: 0 };
+          : { dx: pending.dx, dy: pending.dy, scale: drag?.kind === "scale" ? drag.factor : undefined };
       const ext = contentExtent(mode, sp, cd);
       const showSpecimen = mode !== "candidate";
       const showCandidate = mode !== "specimen";
@@ -487,6 +650,24 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
           v.zoom,
           mode === "diff" ? "difference" : "source-over"
         );
+      // Scale handles on a type candidate whose pixels come from another die.
+      const handles = showCandidate && (!drag || drag.kind === "scale") ? scalableBox() : null;
+      if (handles) {
+        const f = drag?.kind === "scale" ? (drag.factor ?? 1) : 1;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = "#fff";
+        ctx.strokeStyle = "rgba(127,178,255,0.95)";
+        ctx.lineWidth = 1.5;
+        for (const c of handles.corners) {
+          const x = handles.centre.x + (c.x - handles.centre.x) * f;
+          const y = handles.centre.y + (c.y - handles.centre.y) * f;
+          ctx.beginPath();
+          ctx.rect(x - HANDLE_PX / 2, y - HANDLE_PX / 2, HANDLE_PX, HANDLE_PX);
+          ctx.fill();
+          ctx.stroke();
+        }
+      }
     }
   });
 
@@ -502,19 +683,42 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
     const m = propsRef.current.mode;
     const canAlign =
       m !== "sxs" && !!propsRef.current.candidate && m !== "specimen";
+    // A corner handle of a scalable type candidate: scale it.
+    const rect = canvas.getBoundingClientRect();
+    const grab = !panMode && canAlign ? handleAt(e.clientX - rect.left, e.clientY - rect.top) : null;
     dragRef.current = {
-      kind: panMode || !canAlign ? "pan" : "align",
+      kind: grab ? "scale" : panMode || !canAlign ? "pan" : "align",
       sx: e.clientX,
       sy: e.clientY,
       startOx: v.ox,
       startOy: v.oy,
       dx: 0,
-      dy: 0
+      dy: 0,
+      ...(grab ? { centre: grab.centre, corner: grab.corner, factor: 1 } : {})
     };
   };
   const onPointerMove = (e: React.PointerEvent) => {
     const d = dragRef.current;
-    if (!d) return;
+    const canvas = canvasRef.current;
+    if (!d) {
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const over = handleAt(e.clientX - rect.left, e.clientY - rect.top)?.cursor ?? null;
+      if (over !== overHandle) setOverHandle(over);
+      return;
+    }
+    if (d.kind === "scale" && d.centre && d.corner && canvas) {
+      // Uniform: the pointer projected onto the centre → corner diagonal.
+      const rect = canvas.getBoundingClientRect();
+      const px = e.clientX - rect.left - d.centre.x;
+      const py = e.clientY - rect.top - d.centre.y;
+      const kx = d.corner.x - d.centre.x;
+      const ky = d.corner.y - d.centre.y;
+      const len2 = kx * kx + ky * ky;
+      d.factor = len2 > 0 ? Math.min(20, Math.max(0.05, (px * kx + py * ky) / len2)) : 1;
+      redraw();
+      return;
+    }
     const v = viewRef.current;
     if (d.kind === "pan") {
       viewRef.current = {
@@ -533,44 +737,46 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
     dragRef.current = null;
     if (!d) return;
     canvasRef.current?.releasePointerCapture(e.pointerId);
+    if (d.kind === "scale") {
+      if (d.factor && Math.abs(d.factor - 1) > 1e-4) propsRef.current.onScaleCandidate?.(d.factor);
+      redraw();
+      return;
+    }
     if (d.kind === "align" && (d.dx !== 0 || d.dy !== 0)) {
       const v = viewRef.current;
       // Drag vector in screen-aligned world units.
       const wx = d.dx / v.zoom;
       const wy = d.dy / v.zoom;
-      // The crop window (cell.x/cell.y) lives in *unrotated source* space,
-      // but the displayed image is rotate(θ)∘scale(flip) of that crop. To
-      // bake a screen-space drag Δ into the crop origin we apply the inverse
-      // orientation: δ = -S · R(-θ) · Δ  (S = flip, its own inverse).
+      // A whole-type candidate moves in the specimen's frame directly.
+      if (propsRef.current.candidate?.align) {
+        propsRef.current.onAlignCanonical?.(wx, wy);
+        redraw();
+        return;
+      }
+      // The cell origin (cell.x/cell.y) lives in die space, and the displayed
+      // image is the die seen through the inverse placement orientation
+      // (O⁻¹, O = R(θ)·S). Moving the origin by δ shifts the view by −O⁻¹·δ,
+      // so a screen-space drag Δ bakes in as δ = −O · Δ.
       const o = propsRef.current.candidate?.cell
         ? orientOf(propsRef.current.candidate.cell)
         : { flippedH: false, flippedV: false, rotation: 0 as const };
-      const t = (o.rotation * Math.PI) / 180;
-      const c = Math.cos(t);
-      const s = Math.sin(t);
-      // R(-θ) · Δ
-      const ax = c * wx + s * wy;
-      const ay = -s * wx + c * wy;
-      const sx = o.flippedH ? -1 : 1;
-      const sy = o.flippedV ? -1 : 1;
-      // Stash the canonical drag delta onto the candidate's cached image
-      // BEFORE dispatching: the optimistic update fires next, switching the
-      // `cellCropUrl` to one whose image isn't loaded yet — `resolveImg`
-      // will fall back to this entry and translate by the pending offset
-      // so the user sees the cell at exactly the dragged position until
-      // the fresh crop arrives. Accumulates across rapid successive drags
-      // (e.g. drag → release → drag again before the first crop lands).
-      const cellId = propsRef.current.candidate?.cell?.id;
-      if (cellId) {
-        const state = lastImgByCellRef.current.get(cellId);
-        if (state) {
-          state.pendingOffset = {
-            dx: state.pendingOffset.dx + wx,
-            dy: state.pendingOffset.dy + wy
-          };
-        }
+      const delta = applyOrientation({ x: wx, y: wy }, o, 0, 0);
+      // Keep showing the dragged position until the new one lands (see
+      // `settlingRef`), stacking onto a previous release still in flight.
+      const cell = propsRef.current.candidate?.cell;
+      if (cell) {
+        const prev = settlingRef.current;
+        const stack = prev && prev.cellId === cell.id && prev.x === cell.x && prev.y === cell.y;
+        settlingRef.current = {
+          cellId: cell.id,
+          x: cell.x,
+          y: cell.y,
+          dx: wx + (stack ? prev.dx : 0),
+          dy: wy + (stack ? prev.dy : 0),
+          until: performance.now() + 3000
+        };
       }
-      onAlign(-sx * ax, -sy * ay);
+      onAlign(-delta.x, -delta.y);
     }
     redraw();
   };
@@ -624,6 +830,8 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
 
   const cursor: CSSProperties["cursor"] = spaceRef.current
     ? "grab"
+    : overHandle
+      ? `${overHandle}-resize`
     : mode === "sxs"
       ? "grab"
       : candidate && mode !== "specimen"
@@ -713,21 +921,16 @@ const ML_IRREGULAR_STROKE_PX = 1;
 const ML_MIN_SCORE = 0.5;
 
 /**
- * Paint ML via predictions inside the current cell-local frame. The caller
- * has already placed the transform such that (0, 0) is the cell's image
- * top-left at die coords (`cell.x, cell.y`); we translate by `(-cellX, -cellY)`
- * inside our own save/restore so the helper can iterate the raw die-coord
- * predictions without modifying caller state.
+ * Paint ML via predictions at their raw die coordinates. The caller has
+ * already entered the cell's die frame (`enterCellDieFrame`), so they land
+ * on the matching image features.
  */
 function drawMlVias(
   ctx: CanvasRenderingContext2D,
   vias: MLPrediction,
-  cellX: number,
-  cellY: number,
   zoom: number
 ): void {
   ctx.save();
-  ctx.translate(-cellX, -cellY);
   // Point vias: filled green dot with a thin opaque ring for pop against
   // dark imagery. Score gates suppress weak detections.
   const r = ML_POINT_VIA_PX / zoom;

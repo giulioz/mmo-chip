@@ -53,14 +53,21 @@ interface Draft {
   /** Phase-2: `ends[i]` is the locked endpoint of wire `i` once its own click
    *  landed (null = still sweeping with the cursor). Empty in phase 1. */
   ends: (Point | null)[];
+  /** True when this phase-2 draft was opened automatically from the ends of
+   *  the bus segment that was just committed (chained routing). Nothing in
+   *  it is unsaved yet, so Esc/Enter simply stop the chain and ⌘Z falls
+   *  through to undo the committed segment. */
+  continued: boolean;
 }
-const EMPTY: Draft = { phase: 1, points: [], anchors: [], ends: [] };
+const EMPTY: Draft = { phase: 1, points: [], anchors: [], ends: [], continued: false };
 
 export interface MultiWireTool {
   phase: 1 | 2;
   points: Point[];
   /** Phase-2: locked endpoint per start (null = still sweeping). */
   ends: (Point | null)[];
+  /** Phase-2 opened from the previous segment's endpoints (see `Draft`). */
+  continued: boolean;
   /** Phase-1 click → add a start point (with optional net-vertex anchor). */
   addPoint: (world: Point, anchor: DrawAnchor | null) => void;
   /** Phase-2 click → lock the wire nearest the cursor at its current preview
@@ -97,6 +104,11 @@ export interface MultiWireTool {
  * phase 2 where the cursor sweeps N parallel 45°-aligned segments out of those
  * points; a click finishes them as N independent nets (one batched undo).
  * Contextual ⌘Z/⌘⇧Z steps through points and the phase change; Esc aborts.
+ *
+ * Once every wire of a segment has landed, the bus is committed and phase 2
+ * re-opens immediately from the new endpoints (each anchored to its net's
+ * fresh end vertex), so a multi-bend bus is routed segment after segment
+ * without re-clicking every start. Esc or Enter stops the chain.
  */
 export function useMultiWireTool(opts: {
   dispatcher: ActionDispatcher;
@@ -127,12 +139,21 @@ export function useMultiWireTool(opts: {
   }, []);
 
   const undo = useCallback(() => {
-    if (undoRef.current.length === 0) return;
+    if (undoRef.current.length === 0) {
+      // A chained phase 2 with nothing stepped yet holds no unsaved work:
+      // ⌘Z means "take back the segment I just committed". Drop the
+      // continuation (its anchors would dangle) and undo the batch.
+      if (draftRef.current.continued) {
+        reset();
+        void dispatcher.undo();
+      }
+      return;
+    }
     const prev = undoRef.current[undoRef.current.length - 1];
     undoRef.current = undoRef.current.slice(0, -1);
     redoRef.current = [draftRef.current, ...redoRef.current];
     setDraft(prev);
-  }, []);
+  }, [dispatcher, reset]);
 
   const redo = useCallback(() => {
     if (redoRef.current.length === 0) return;
@@ -153,26 +174,21 @@ export function useMultiWireTool(opts: {
           { x: Math.round(world.x), y: Math.round(world.y) }
         ],
         anchors: [...d.anchors, anchor],
-        ends: []
+        ends: [],
+        continued: false
       });
     },
     [apply]
   );
 
-  const enter = useCallback(() => {
-    const d = draftRef.current;
-    if (d.phase === 1 && d.points.length >= 1) {
-      apply({
-        phase: 2,
-        points: d.points,
-        anchors: d.anchors,
-        ends: d.points.map(() => null)
-      });
-    }
-  }, [apply]);
-
+  /**
+   * Commit every wire whose end is locked (`ends[i] !== null`) in one batched
+   * undo, then re-open phase 2 from those ends. Wires with a null end are
+   * dropped. Called with all ends locked (the last click) or a partial set
+   * (Enter).
+   */
   const finalize = useCallback(
-    (d: Draft, ends: Point[]) => {
+    (d: Draft, ends: (Point | null)[]) => {
       const layer = useDieViewerStore.getState().wireLayer;
       const nets = netsRef.current;
       const nameBase = nets.length;
@@ -190,9 +206,15 @@ export function useMultiWireTool(opts: {
       const origByNet = new Map<string, AnnotationNet>();
       const curByNet = new Map<string, AnnotationNet>();
       const newNets: AnnotationNet[] = [];
+      // Per committed wire: its end + the net/vertex it landed on — the
+      // starts and anchors of the chained phase 2 that opens after the commit.
+      const nextPoints: Point[] = [];
+      const nextAnchors: DrawAnchor[] = [];
 
       d.points.forEach((p, i) => {
         const e = ends[i];
+        if (!e) return; // still sweeping → dropped
+        nextPoints.push({ x: e.x, y: e.y });
         const endNode = { id: uid(), x: e.x, y: e.y };
         const anchor = d.anchors[i];
         const orig = anchor
@@ -206,14 +228,17 @@ export function useMultiWireTool(opts: {
             nodes: [...cur.nodes, endNode],
             edges: [...cur.edges, mkEdge(anchor.nodeId, endNode.id)]
           });
+          nextAnchors.push({ netId: orig.id, nodeId: endNode.id });
         } else {
           const startNode = { id: uid(), x: p.x, y: p.y };
-          newNets.push({
+          const net: AnnotationNet = {
             id: uid(),
             name: `Net ${nameBase + newNets.length + 1}`,
             nodes: [startNode, endNode],
             edges: [mkEdge(startNode.id, endNode.id)]
-          });
+          };
+          newNets.push(net);
+          nextAnchors.push({ netId: net.id, nodeId: endNode.id });
         }
       });
 
@@ -229,15 +254,55 @@ export function useMultiWireTool(opts: {
           prevNet: null
         }))
       ];
-      if (actions.length > 0) {
-        void dispatcher.dispatch(
-          actions.length === 1 ? actions[0] : { kind: "batch", actions }
-        );
+      if (actions.length === 0) {
+        reset();
+        return;
       }
-      reset();
+      void dispatcher.dispatch(
+        actions.length === 1 ? actions[0] : { kind: "batch", actions }
+      );
+      // Chain: re-open phase 2 from the ends just committed, each wire
+      // anchored to its net's new end vertex so the next segment extends it.
+      // No local undo history — nothing here is unsaved (see `undo`).
+      undoRef.current = [];
+      redoRef.current = [];
+      setDraft({
+        phase: 2,
+        points: nextPoints,
+        anchors: nextAnchors,
+        ends: nextPoints.map(() => null),
+        continued: true
+      });
     },
     [dispatcher, reset]
   );
+
+  const enter = useCallback(() => {
+    const d = draftRef.current;
+    if (d.phase === 2) {
+      // Save what's placed: every wire with a locked end is committed and
+      // the chain continues from those ends; wires still sweeping are
+      // dropped. With nothing locked, Enter in a chained segment means
+      // "done routing this bus" (the previous segments are already saved);
+      // in a fresh phase 2 it's a no-op so a double Enter can't lose the
+      // collected starts.
+      if (d.ends.some((e) => e !== null)) {
+        finalize(d, d.ends);
+      } else if (d.continued) {
+        reset();
+      }
+      return;
+    }
+    if (d.phase === 1 && d.points.length >= 1) {
+      apply({
+        phase: 2,
+        points: d.points,
+        anchors: d.anchors,
+        ends: d.points.map(() => null),
+        continued: false
+      });
+    }
+  }, [apply, reset, finalize]);
 
   const endWire = useCallback(
     (
@@ -295,7 +360,7 @@ export function useMultiWireTool(opts: {
         apply({ ...d, ends: nextEnds });
         return;
       }
-      finalize(d, nextEnds as Point[]);
+      finalize(d, nextEnds);
     },
     [apply, finalize]
   );
@@ -320,7 +385,7 @@ export function useMultiWireTool(opts: {
         apply({ ...d, ends: nextEnds });
         return;
       }
-      finalize(d, nextEnds as Point[]);
+      finalize(d, nextEnds);
     },
     [apply, finalize]
   );
@@ -340,7 +405,8 @@ export function useMultiWireTool(opts: {
           y: Math.round(s.point.y)
         })),
         anchors: starts.map((s) => s.anchor),
-        ends: starts.map(() => null)
+        ends: starts.map(() => null),
+        continued: false
       });
     },
     []
@@ -393,6 +459,7 @@ export function useMultiWireTool(opts: {
     phase: draft.phase,
     points: draft.points,
     ends: draft.ends,
+    continued: draft.continued,
     addPoint,
     endWire,
     endWires,

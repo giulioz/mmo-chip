@@ -22,9 +22,14 @@ const SWEEP_CONCURRENCY = 2;
 /** Don't flood WS clients — coalesce progress to at most one per interval. */
 const BROADCAST_THROTTLE_MS = 700;
 
+/** The sidecar's resident checkpoint changed while a sweep was running. */
+export class ModelChangedDuringSweep extends Error {}
+
 export interface MLJobManager {
   /** Current job state for a die (recomputed against the cache on disk). */
   getJob(dieId: string): Promise<MLInferenceJob>;
+  /** True while any die's sweep is in flight (model switches must wait). */
+  hasActiveJobs(): boolean;
   /** Every persisted job (stale "running" jobs reconciled to "stopped"). */
   listJobs(): Promise<MLInferenceJob[]>;
   /** Begin (or resume) a die-wide inference sweep. */
@@ -78,12 +83,29 @@ export function createMLJobManager(config: {
       .length;
   }
 
-  async function persistAndBroadcast(job: MLInferenceJob): Promise<void> {
-    await writeMLJob(dataRoot, job);
-    onJobChange?.(job);
+  // Job writes are serialized per die. Progress ticks are fired without
+  // awaiting, so without a queue a tick that started before the sweep ended
+  // could finish *after* the terminal write and overwrite "failed" /
+  // "completed" with a stale "running".
+  const writeQueue = new Map<string, Promise<void>>();
+  function persistAndBroadcast(job: MLInferenceJob): Promise<void> {
+    const prev = writeQueue.get(job.dieId) ?? Promise.resolve();
+    const next = prev
+      .catch(() => undefined)
+      .then(() => writeMLJob(dataRoot, job))
+      .then(() => {
+        onJobChange?.(job);
+      });
+    writeQueue.set(job.dieId, next);
+    return next;
   }
 
   async function getJob(dieId: string): Promise<MLInferenceJob> {
+    // Sample this first: a sweep persists its terminal state *before* it
+    // leaves `active`, so "not active" guarantees the file is final. Checking
+    // after the reads below could pair a stale "running" record with an
+    // already-finished sweep and report it as merely "stopped".
+    const running = active.has(dieId);
     const record = await readDieRecord(dataRoot, dieId);
     const { columns, rows } = nativeGrid(record);
     const totalTiles = columns * rows;
@@ -103,8 +125,6 @@ export function createMLJobManager(config: {
       hash,
       record.maxZoomLevel
     );
-    const running = active.has(dieId);
-
     const status: MLInferenceJob["status"] = running
       ? "running"
       : completedTiles >= totalTiles && totalTiles > 0
@@ -179,6 +199,17 @@ export function createMLJobManager(config: {
           emit(false);
           continue;
         }
+        // The cache dir is keyed by the checkpoint this sweep started with.
+        // If the sidecar now serves a different model, every further tile
+        // would be filed under the wrong hash — abort instead of mixing.
+        // (`getCheckpointHash` is memoized for ~10s, so this is cheap.)
+        const live = await predictor.getCheckpointHash();
+        if (live !== hash) {
+          throw new ModelChangedDuringSweep(
+            `model changed during sweep (started with ${hash ?? "no hash"}, ` +
+              `sidecar now serves ${live ?? "no hash"}) — restart inference`
+          );
+        }
         const result = await predictor.runPrediction({
           originalPath: record.originalPath,
           dieWidth: record.width,
@@ -210,18 +241,23 @@ export function createMLJobManager(config: {
     } catch (error) {
       job.status = "failed";
       job.error =
-        error instanceof SidecarUnavailable
+        error instanceof SidecarUnavailable || error instanceof ModelChangedDuringSweep
           ? error.message
           : error instanceof Error
             ? error.message
             : "inference failed";
     } finally {
-      active.delete(record.id);
       job.completedTiles = Math.min(completed, job.totalTiles);
       job.percentage = pct(job.completedTiles, job.totalTiles);
       job.finishedAt = new Date().toISOString();
       job.updatedAt = job.finishedAt;
-      emit(true);
+      // Persist the terminal state *before* leaving the active set: `getJob`
+      // reports "running" while active, and otherwise derives the status
+      // from the persisted record — a reader in between would see the last
+      // progress tick ("running") and report a completed/failed sweep as
+      // merely "stopped".
+      await persistAndBroadcast({ ...job });
+      active.delete(record.id);
     }
   }
 
@@ -275,5 +311,9 @@ export function createMLJobManager(config: {
     return getJob(dieId);
   }
 
-  return { getJob, listJobs, startJob, stopJob };
+  function hasActiveJobs(): boolean {
+    return active.size > 0;
+  }
+
+  return { getJob, listJobs, startJob, stopJob, hasActiveJobs };
 }

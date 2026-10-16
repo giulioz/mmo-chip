@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { ProposalOverride } from "../lib/cellDetection";
 
 /**
  * Transient per-session UI state for the Merge cells page. Selections only —
@@ -18,8 +19,12 @@ interface MergeState {
   expandedTypes: string[];
   /** The "Unmatched" folder open in the left panel. */
   unmatchedOpen: boolean;
-  /** The "ML" folder open (always empty for now). */
+  /** The "ML" folder (cell-detection proposals grouped by type) open. */
   mlOpen: boolean;
+  /** Unsaved flip / rotate / drag-align tweaks per proposal (keyed by
+   *  detection id). Proposals aren't persisted cells, so orientation edits
+   *  stay here until the proposal is approved into a real cell. */
+  proposalOverrides: Record<string, ProposalOverride>;
 }
 
 interface MergeActions {
@@ -29,6 +34,8 @@ interface MergeActions {
   toggleType: (id: string) => void;
   setUnmatchedOpen: (open: boolean) => void;
   setMlOpen: (open: boolean) => void;
+  patchProposalOverride: (detectionId: string, patch: ProposalOverride) => void;
+  clearProposalOverride: (detectionId: string) => void;
   reset: () => void;
 }
 
@@ -38,7 +45,8 @@ const INITIAL: MergeState = {
   candidateCellId: null,
   expandedTypes: [],
   unmatchedOpen: true,
-  mlOpen: false
+  mlOpen: false,
+  proposalOverrides: {}
 };
 
 export const useMergeStore = create<MergeState & MergeActions>()((set, get) => ({
@@ -56,6 +64,19 @@ export const useMergeStore = create<MergeState & MergeActions>()((set, get) => (
     })),
   setUnmatchedOpen: (open) => set({ unmatchedOpen: open }),
   setMlOpen: (open) => set({ mlOpen: open }),
+  patchProposalOverride: (detectionId, patch) =>
+    set((s) => ({
+      proposalOverrides: {
+        ...s.proposalOverrides,
+        [detectionId]: { ...s.proposalOverrides[detectionId], ...patch }
+      }
+    })),
+  clearProposalOverride: (detectionId) =>
+    set((s) => {
+      if (!(detectionId in s.proposalOverrides)) return s;
+      const { [detectionId]: _, ...rest } = s.proposalOverrides;
+      return { proposalOverrides: rest };
+    }),
   reset: () => {
     // Keep folder open-state; only clear selections.
     const { unmatchedOpen, mlOpen, expandedTypes } = get();

@@ -2,12 +2,15 @@ import cors from "cors";
 import express from "express";
 import { createImportJobManager } from "./dieImport/jobs.js";
 import { createAnnotationsRouter } from "./api/annotations.js";
+import { createCellDetectionRouter } from "./api/cellDetection.js";
+import { createCellImagingRouter } from "./api/cellImaging.js";
 import { createDiesRouter } from "./api/dies.js";
 import { createHealthRouter } from "./api/health.js";
 import { createJobsRouter } from "./api/jobs.js";
 import { createMLRouter } from "./api/ml.js";
 import { createMLExportRouter } from "./api/mlExport.js";
 import { createTilesRouter } from "./api/tiles.js";
+import { createMLPredictor } from "./ml/predict.js";
 import { listDieRecords } from "./store.js";
 import { createTileScheduler } from "./tileScheduler.js";
 import type { AnnotationBroadcaster } from "./ws.js";
@@ -50,7 +53,8 @@ export function createApp(config: {
     createDiesRouter({
       dataRoot: config.dataRoot,
       tileScheduler,
-      importJobManager
+      importJobManager,
+      broadcaster: config.broadcaster
     })
   );
   app.use(createTilesRouter({ dataRoot: config.dataRoot, tileScheduler }));
@@ -62,12 +66,32 @@ export function createApp(config: {
     })
   );
   app.use(createMLExportRouter({ dataRoot: config.dataRoot }));
+  const predictor = createMLPredictor({
+    mlSidecarUrl: config.mlSidecarUrl,
+    dataRoot: config.dataRoot,
+    mlPredictPad: config.mlPredictPad
+  });
   app.use(createMLRouter({
     mlSidecarUrl: config.mlSidecarUrl,
     dataRoot: config.dataRoot,
     mlPredictPad: config.mlPredictPad,
-    broadcaster: config.broadcaster
+    broadcaster: config.broadcaster,
+    predictor
   }));
+  app.use(
+    createCellDetectionRouter({
+      dataRoot: config.dataRoot,
+      predictor,
+      broadcaster: config.broadcaster
+    })
+  );
+  app.use(
+    createCellImagingRouter({
+      dataRoot: config.dataRoot,
+      tileScheduler,
+      broadcaster: config.broadcaster
+    })
+  );
 
   app.use(
     (

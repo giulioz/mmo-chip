@@ -22,8 +22,8 @@ interface PreferencesState {
   netColor: string;
   /** Cell outline + block-fill color (one of CELL_COLOR_OPTIONS). */
   cellColor: string;
-  /** When false, cells always render as a solid block even when zoomed in
-   *  (the detailed inner layer shapes are never drawn). */
+  /** When true, cells draw their inner layer shapes at every zoom level;
+   *  when false, they always render as a solid block. */
   cellShowShapes: boolean;
   /** When true, the cell-rectangle tool snaps the drawn rect's edges to
    *  nearby grid guides (guide behaviour itself lands in a later phase). */
@@ -80,6 +80,29 @@ interface PreferencesState {
    *  Inference caches every detection with its score; this slider filters
    *  the cached results client-side — no re-inference on change. */
   viaConfidenceThreshold: number;
+  /** Minimum score (0..1) for an ML cell proposal to be shown / offered in
+   *  merge-cells. Separate from the via threshold so the two overlays can be
+   *  tuned independently. */
+  cellDetectionThreshold: number;
+  /** Die-viewer: hide the ML cell proposals overlay. */
+  cellDetectionsHidden: boolean;
+  /** Cell detection: search for horizontally / vertically mirrored copies. */
+  cellDetectAllowFlipX: boolean;
+  cellDetectAllowFlipY: boolean;
+  /** Cell detection: drop candidates overlapping any placed cell. */
+  cellDetectAvoidExisting: boolean;
+  /** Cell detection: build the template from the type's instances on every
+   *  die of the cell library. */
+  cellDetectAllDies: boolean;
+  /** Specimens: stack instances from every die of the cell library too. */
+  specimensAllDies: boolean;
+  /** Die-viewer: hide the wire-likelihood overlay. */
+  wireMapHidden: boolean;
+  /** Wire-likelihood overlay opacity 0..1. */
+  wireMapOpacity: number;
+  /** Merge cells / Cell RE: show a type's clean specimen (when generated)
+   *  instead of one raw instance crop. */
+  useCleanSpecimens: boolean;
   /** Die-viewer right-panel tab (Inspector / ML). Persisted so the panel
    *  re-opens where the user left it. The ML tab also drives a canvas
    *  render mode (traces/vias sized from mlConfig). */
@@ -124,6 +147,16 @@ interface PreferencesActions {
   setWireAutoEndOnVia: (enabled: boolean) => void;
   setViaSize: (size: number) => void;
   setViaConfidenceThreshold: (threshold: number) => void;
+  setCellDetectionThreshold: (threshold: number) => void;
+  setCellDetectionsHidden: (hidden: boolean) => void;
+  setCellDetectAllowFlipX: (allow: boolean) => void;
+  setCellDetectAllowFlipY: (allow: boolean) => void;
+  setCellDetectAvoidExisting: (avoid: boolean) => void;
+  setCellDetectAllDies: (all: boolean) => void;
+  setSpecimensAllDies: (all: boolean) => void;
+  setWireMapHidden: (hidden: boolean) => void;
+  setWireMapOpacity: (opacity: number) => void;
+  setUseCleanSpecimens: (use: boolean) => void;
   setInspectorTab: (tab: InspectorTab) => void;
   toggleKindVisibility: (kind: AnnotationKind) => void;
   toggleSectionExpanded: (kind: AnnotationKind) => void;
@@ -160,6 +193,16 @@ export const usePreferences = create<PreferencesState & PreferencesActions>()(
         wireAutoEndOnVia: false,
         viaSize: VIA_DEFAULT_SIZE,
         viaConfidenceThreshold: 0.5,
+        cellDetectionThreshold: 0.5,
+        cellDetectionsHidden: false,
+        cellDetectAllowFlipX: true,
+        cellDetectAllowFlipY: true,
+        cellDetectAvoidExisting: true,
+        cellDetectAllDies: false,
+        specimensAllDies: false,
+        wireMapHidden: false,
+        wireMapOpacity: 0.8,
+        useCleanSpecimens: true,
         inspectorTab: "inspector",
 
         setNetWidth: (width) => set({ netWidth: width }),
@@ -226,6 +269,19 @@ export const usePreferences = create<PreferencesState & PreferencesActions>()(
           set({
             viaConfidenceThreshold: Math.min(1, Math.max(0, threshold))
           }),
+        setCellDetectionThreshold: (threshold) =>
+          set({
+            cellDetectionThreshold: Math.min(1, Math.max(0, threshold))
+          }),
+        setCellDetectionsHidden: (hidden) => set({ cellDetectionsHidden: hidden }),
+        setCellDetectAllowFlipX: (allow) => set({ cellDetectAllowFlipX: allow }),
+        setCellDetectAllowFlipY: (allow) => set({ cellDetectAllowFlipY: allow }),
+        setCellDetectAvoidExisting: (avoid) => set({ cellDetectAvoidExisting: avoid }),
+        setCellDetectAllDies: (all) => set({ cellDetectAllDies: all }),
+        setSpecimensAllDies: (all) => set({ specimensAllDies: all }),
+        setWireMapHidden: (hidden) => set({ wireMapHidden: hidden }),
+        setWireMapOpacity: (opacity) => set({ wireMapOpacity: Math.min(1, Math.max(0, opacity)) }),
+        setUseCleanSpecimens: (use) => set({ useCleanSpecimens: use }),
         setInspectorTab: (tab) => set({ inspectorTab: tab }),
         toggleKindVisibility: (kind) =>
           set((state) => ({
@@ -283,6 +339,16 @@ export const usePreferences = create<PreferencesState & PreferencesActions>()(
           wireAutoEndOnVia: state.wireAutoEndOnVia,
           viaSize: state.viaSize,
           viaConfidenceThreshold: state.viaConfidenceThreshold,
+          cellDetectionThreshold: state.cellDetectionThreshold,
+          cellDetectionsHidden: state.cellDetectionsHidden,
+          cellDetectAllowFlipX: state.cellDetectAllowFlipX,
+          cellDetectAllowFlipY: state.cellDetectAllowFlipY,
+          cellDetectAvoidExisting: state.cellDetectAvoidExisting,
+          cellDetectAllDies: state.cellDetectAllDies,
+          specimensAllDies: state.specimensAllDies,
+          wireMapHidden: state.wireMapHidden,
+          wireMapOpacity: state.wireMapOpacity,
+          useCleanSpecimens: state.useCleanSpecimens,
           inspectorTab: state.inspectorTab
         })
       }

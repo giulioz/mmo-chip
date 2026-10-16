@@ -116,6 +116,29 @@ class ModelState:
 
 STATE = ModelState()
 
+# The checkpoint last loaded successfully, so a sidecar restart (e.g. `npm run
+# dev`) comes back on the model the user picked instead of the CLI default.
+# Node keys its prediction cache by checkpoint hash, so coming up on a
+# different model makes every cached via "disappear" from the UI.
+RESIDENT_FILE = ML_DIR / "checkpoints" / ".resident"
+
+
+def remember_resident(path: Path) -> None:
+    try:
+        RESIDENT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        RESIDENT_FILE.write_text(str(path.resolve()) + "\n", encoding="utf-8")
+    except OSError as exc:
+        print(f"[sidecar] could not record resident checkpoint: {exc}")
+
+
+def recall_resident() -> Path | None:
+    try:
+        raw = RESIDENT_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    p = Path(raw)
+    return p if raw and p.exists() else None
+
 
 @dataclass
 class JobRecord:
@@ -360,6 +383,8 @@ def model_reload(body: ReloadBody) -> dict:
         raise HTTPException(status_code=400, detail=f"checkpoint not found: {p}")
     with STATE.lock:
         STATE.load(p)
+    if STATE.model_loaded and STATE.checkpoint_path:
+        remember_resident(STATE.checkpoint_path)
     return {
         "checkpoint": STATE.checkpoint_path.name if STATE.checkpoint_path else None,
         "checkpoint_hash": STATE.checkpoint_hash,
@@ -369,17 +394,27 @@ def model_reload(body: ReloadBody) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", default=os.environ.get("ML_CHECKPOINT", "checkpoints/model.pt"))
+    parser.add_argument("--checkpoint", default=os.environ.get("ML_CHECKPOINT"),
+                        help="checkpoint to load; default: the last one loaded via "
+                             "/model/reload, else checkpoints/model.pt")
     parser.add_argument("--data-root", default=os.environ.get("ML_DATA_ROOT", str(ML_DIR.parent / "data")))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=int(os.environ.get("ML_SIDECAR_PORT", 8001)))
     args = parser.parse_args()
 
     STATE.data_root = Path(args.data_root)
-    ckpt = Path(args.checkpoint)
-    if not ckpt.is_absolute():
-        ckpt = ML_DIR / ckpt
+    if args.checkpoint:
+        ckpt = Path(args.checkpoint)
+        if not ckpt.is_absolute():
+            ckpt = ML_DIR / ckpt
+    else:
+        remembered = recall_resident()
+        if remembered is not None:
+            print(f"[sidecar] resuming resident checkpoint {remembered}")
+        ckpt = remembered or (ML_DIR / "checkpoints" / "model.pt")
     STATE.load(ckpt)
+    if STATE.model_loaded and STATE.checkpoint_path:
+        remember_resident(STATE.checkpoint_path)
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 

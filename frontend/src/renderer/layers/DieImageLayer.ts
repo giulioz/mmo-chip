@@ -38,8 +38,23 @@ export interface DieImageDisplay {
   getOpacity?: () => number;
 }
 
+/** Alternate tile source sharing the die's pyramid geometry — lets the same
+ *  layer render derived RGBA overlays (e.g. the wire-likelihood map). */
+export interface DieImageSource {
+  /** Layer id (must be unique among a renderer's layers). */
+  id: string;
+  tileUrl: (z: number, x: number, y: number) => string;
+  /** Draw cached coarser levels underneath the target level. Right for the
+   *  opaque base image (no flash while finer tiles load); wrong for a
+   *  translucent overlay, where stacked levels would compound. Default true. */
+  pyramid?: boolean;
+  /** Lowest level that has tiles; at coarser zooms nothing is drawn. */
+  minLevel?: number;
+}
+
 export class DieImageLayer implements Layer {
-  readonly id = "die-image";
+  readonly id: string;
+  private readonly source: DieImageSource | null;
   private readonly metadata: DieMetadata;
   private readonly cache = new Map<string, CachedImageTile>();
   private useCounter = 0;
@@ -49,9 +64,15 @@ export class DieImageLayer implements Layer {
    *  one is safe). Lazily created / resized to the tile's device size. */
   private scratch: HTMLCanvasElement | null = null;
 
-  constructor(metadata: DieMetadata, display: DieImageDisplay = {}) {
+  constructor(
+    metadata: DieMetadata,
+    display: DieImageDisplay = {},
+    source: DieImageSource | null = null
+  ) {
     this.metadata = metadata;
     this.display = display;
+    this.source = source;
+    this.id = source?.id ?? "die-image";
   }
 
   subscribe(invalidate: (worldRect?: Rect) => void): () => void {
@@ -74,8 +95,10 @@ export class DieImageLayer implements Layer {
     // some content visible while finer tiles are still loading — no black
     // flash when zooming in. We only fire network requests for the target
     // level, so coarser levels are pure-cache reads.
+    if (this.source?.minLevel !== undefined && targetLevel < this.source.minLevel) return;
+    const stackLevels = this.source?.pyramid !== false;
     const drawPyramid = (g: CanvasRenderingContext2D) => {
-      for (let level = 0; level < targetLevel; level++) {
+      for (let level = 0; stackLevels && level < targetLevel; level++) {
         this.drawLevel(g, level, world, false);
       }
       this.drawLevel(g, targetLevel, world, true);
@@ -220,7 +243,9 @@ export class DieImageLayer implements Layer {
       entry.failed = true;
     });
 
-    image.src = `/api/dies/${this.metadata.id}/tiles/${z}/${x}/${y}`;
+    image.src = this.source
+      ? this.source.tileUrl(z, x, y)
+      : `/api/dies/${this.metadata.id}/tiles/${z}/${x}/${y}`;
     return entry;
   }
 

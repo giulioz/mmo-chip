@@ -262,10 +262,11 @@ export interface Orientation {
 
 /**
  * Map a point from canonical cell-local coordinates into oriented cell-local
- * coordinates (still relative to the cell's top-left origin). Mirrors the
- * canvas display transform used by the cell-RE / merge canvases:
- * `translate(centre) · rotate(θ) · scale(±1,±1) · translate(-w/2,-h/2)` —
- * i.e. mirror about the box centre, then rotate about it.
+ * coordinates (still relative to the cell's top-left origin): mirror about
+ * the box centre, then rotate about it — `O = R(θ)·S`, the placement
+ * convention shared with the die-viewer cell renderer and the backend. The
+ * cell-RE / merge canvases show die pixels in the canonical frame through
+ * the inverse, `toCanonical`.
  *
  * Add the cell's `(x, y)` to the result for die/world coordinates.
  */
@@ -297,6 +298,37 @@ export function applyOrientation(
       break;
   }
   return { x: rx + boxW / 2, y: ry + boxH / 2 };
+}
+
+/** Inverse of `applyOrientation`: oriented cell-local → canonical (un-rotate,
+ *  then un-flip). Subtract the cell's `(x, y)` from a die point first. */
+export function toCanonical(
+  p: Point,
+  o: Orientation,
+  boxW: number,
+  boxH: number
+): Point {
+  const rx = p.x - boxW / 2;
+  const ry = p.y - boxH / 2;
+  let qx = rx;
+  let qy = ry;
+  switch (o.rotation ?? 0) {
+    case 90:
+      qx = ry;
+      qy = -rx;
+      break;
+    case 180:
+      qx = -rx;
+      qy = -ry;
+      break;
+    case 270:
+      qx = -ry;
+      qy = rx;
+      break;
+  }
+  if (o.flippedH) qx = -qx;
+  if (o.flippedV) qy = -qy;
+  return { x: qx + boxW / 2, y: qy + boxH / 2 };
 }
 
 // ── Internal ─────────────────────────────────────────────────────────

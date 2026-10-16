@@ -6,11 +6,19 @@ import type {
   ShapeLabel,
 } from "shared";
 
+/** The shape the menu opened on — the label / diffusion-type sections key
+ *  off its layer. */
+export interface ShapeMenuAnchor {
+  layer: LayerType;
+  shape: LayerShape;
+}
+
 export interface ShapeContextMenuState {
   x: number;
   y: number;
-  layer: LayerType;
-  shape: LayerShape;
+  /** Null when the menu opened on a multi-selection's group box rather than
+   *  on a shape: only the selection-wide actions apply. */
+  anchor: ShapeMenuAnchor | null;
 }
 
 /**
@@ -42,6 +50,11 @@ interface Props {
   appliedForcedType: AppliedForcedType;
   /** Show Paste as enabled when the clipboard has at least one shape. */
   hasClipboard: boolean;
+  /** A quarter turn / a mirror of the selection would move something (not
+   *  a lone point, square or rect). */
+  canRotate: boolean;
+  canFlipH: boolean;
+  canFlipV: boolean;
   onClose: () => void;
   /** Set / clear `label` on the metal label-group targets. `null` clears. */
   onSetLabel: (label: ShapeLabel | null) => void;
@@ -51,6 +64,11 @@ interface Props {
   onDuplicate: () => void;
   onCopy: () => void;
   onPaste: () => void;
+  /** Quarter-turn the selection about the centre of its bounds (90 =
+   *  clockwise). */
+  onRotate: (deg: 90 | -90) => void;
+  /** Mirror the selection across its bounds' centre line ("h" = left↔right). */
+  onFlip: (axis: "h" | "v") => void;
   onDelete: () => void;
 }
 
@@ -60,7 +78,11 @@ interface Props {
  *   - metal1 / metal2 → Label as VDD / GND / Chip I/O / Input / Output
  *                       (+ Clear when set)
  *   - diffusion       → Force P-type (VDD body) / N-type (GND body) (+ Clear)
- *   - all layers      → Duplicate / Copy / Paste (gated) / Delete
+ *   - all layers      → Duplicate / Copy / Paste (gated) / Flip H / V and
+ *                       Rotate 90° both ways (about the selection's centre) /
+ *                       Delete
+ * Opened on a multi-selection's group box (no anchor shape), only the
+ * selection-wide actions show.
  *
  * Dismissal / positioning mirror `CellREContextMenu` so right-click feels
  * consistent across the RE page.
@@ -73,12 +95,17 @@ export function ShapeContextMenu({
   forcedTypeTargetCount,
   appliedForcedType,
   hasClipboard,
+  canRotate,
+  canFlipH,
+  canFlipV,
   onClose,
   onSetLabel,
   onSetForcedType,
   onDuplicate,
   onCopy,
   onPaste,
+  onRotate,
+  onFlip,
   onDelete
 }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -102,12 +129,13 @@ export function ShapeContextMenu({
   // The width estimate has to cover the longest item; "Force N-type (GND body)"
   // is ~210 px at the current font, so 240 leaves a tiny safety margin.
   const MENU_W = 240;
-  const MENU_H = 260;
+  const MENU_H = 390;
   const x = Math.min(menu.x, window.innerWidth - MENU_W);
   const y = Math.min(menu.y, window.innerHeight - MENU_H);
 
-  const isMetal = menu.layer === "metal1" || menu.layer === "metal2";
-  const isDiffusion = menu.layer === "diffusion";
+  const layer = menu.anchor?.layer;
+  const isMetal = layer === "metal1" || layer === "metal2";
+  const isDiffusion = layer === "diffusion";
   const plural = selectionCount > 1 ? ` (${selectionCount})` : "";
   // Section-header hint. We only surface the count when it's >1 — the single-
   // shape case is the obvious default and the chrome would be noise.
@@ -212,6 +240,35 @@ export function ShapeContextMenu({
       </button>
       <button className="menu-item" disabled={!hasClipboard} onClick={run(onPaste)}>
         Paste
+      </button>
+      <div className="menu-sep" />
+      <button
+        className="menu-item"
+        disabled={!canFlipH}
+        onClick={run(() => onFlip("h"))}
+      >
+        Flip horizontally{plural}
+      </button>
+      <button
+        className="menu-item"
+        disabled={!canFlipV}
+        onClick={run(() => onFlip("v"))}
+      >
+        Flip vertically{plural}
+      </button>
+      <button
+        className="menu-item"
+        disabled={!canRotate}
+        onClick={run(() => onRotate(90))}
+      >
+        Rotate 90° clockwise{plural}
+      </button>
+      <button
+        className="menu-item"
+        disabled={!canRotate}
+        onClick={run(() => onRotate(-90))}
+      >
+        Rotate 90° counter-clockwise{plural}
       </button>
       <div className="menu-sep" />
       <button className="menu-item danger" onClick={run(onDelete)}>

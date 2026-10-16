@@ -123,6 +123,39 @@ export const Ic = {
       <path d="M9 8h5" />
     </>
   ),
+  // A cell stamped from the library, with a scale arrow on its corner.
+  libraryCell: Icon(
+    <>
+      <rect x="2.5" y="2.5" width="8" height="8" />
+      <path d="M2.5 6.5h8M6.5 2.5v8" opacity=".5" />
+      <path d="M10.5 10.5l3 3M13.5 11v2.5H11" />
+    </>
+  ),
+  rotateCw: Icon(
+    <>
+      <path d="M13 8a5 5 0 11-1.5-3.5" />
+      <path d="M13 2v3h-3" />
+    </>
+  ),
+  rotateCcw: Icon(
+    <>
+      <path d="M3 8a5 5 0 101.5-3.5" />
+      <path d="M3 2v3h3" />
+    </>
+  ),
+  flipH: Icon(
+    <>
+      <path d="M8 2v12" strokeDasharray="2 1.6" />
+      <path d="M6 5L2.5 8 6 11zM10 5l3.5 3-3.5 3z" />
+    </>
+  ),
+  flipV: Icon(
+    <>
+      <path d="M2 8h12" strokeDasharray="2 1.6" />
+      <path d="M5 6L8 2.5 11 6zM5 10l3 3.5 3-3.5z" />
+    </>
+  ),
+  check: Icon(<path d="M3 8.5l3 3 7-7" />),
   mlIgnore: Icon(
     <>
       <rect x="3" y="3" width="10" height="10" rx="1" />

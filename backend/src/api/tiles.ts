@@ -2,6 +2,8 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { Router } from "express";
 import sharp from "sharp";
+import { resolveCellType } from "../cellLibrary.js";
+import { footprint, orientOf } from "../ml/cellDetect.js";
 import { readAnnotations, readDieRecord } from "../store.js";
 import type { createTileScheduler } from "../tileScheduler.js";
 
@@ -19,19 +21,31 @@ export function createTilesRouter(config: {
 
       const cell = annotations.cells.find((c) => c.id === cellId);
       if (!cell) { response.status(404).json({ error: "Cell not found" }); return; }
-      const cellType = annotations.cellTypes.find((ct) => ct.id === cell.cellTypeId);
+      // Own type, or a library type owned by another die (in this die's px).
+      const cellType = (
+        await resolveCellType(config.dataRoot, record, annotations, cell.cellTypeId, cell.cellTypeDieId)
+      )?.type;
       if (!cellType) { response.status(404).json({ error: "Cell type not found" }); return; }
 
-      // Crop region (cache key includes coords so re-aligning invalidates the old cache)
+      // Crop region = the instance's die footprint: the W×H box oriented about
+      // its centre, so a quarter turn swaps its extent.
       const { width: cropW, height: cropH } = cellType.cropRect;
-      const left = Math.max(0, Math.round(cell.x));
-      const top = Math.max(0, Math.round(cell.y));
-      const width = Math.min(Math.round(cropW), record.width - left);
-      const height = Math.min(Math.round(cropH), record.height - top);
+      const fp = footprint(cell.x, cell.y, orientOf(cell), cropW, cropH);
+      const quarter = cell.rotation === 90 || cell.rotation === 270;
+      const fullW = Math.round(quarter ? cropH : cropW);
+      const fullH = Math.round(quarter ? cropW : cropH);
+      const left = Math.max(0, Math.round(fp.x0));
+      const top = Math.max(0, Math.round(fp.y0));
+      const width = Math.min(fullW, record.width - left);
+      const height = Math.min(fullH, record.height - top);
 
-      // Check cache
+      // Check cache. The key includes coords so re-aligning invalidates the old
+      // cache; a footprint the shape of the type's box keeps the original key
+      // (existing crops stay valid), a quarter-turned one adds its size.
       const cacheDir = path.join(config.dataRoot, "dies", dieId, "cell-crops");
-      const cachePath = path.join(cacheDir, `${cellId}-${left}-${top}.jpg`);
+      const shape =
+        fullW === Math.round(cropW) && fullH === Math.round(cropH) ? "" : `-${fullW}x${fullH}`;
+      const cachePath = path.join(cacheDir, `${cellId}-${left}-${top}${shape}.jpg`);
       try {
         await fs.access(cachePath);
         response.sendFile(cachePath);
@@ -103,6 +117,51 @@ export function createTilesRouter(config: {
         .jpeg({ quality: 90 })
         .toFile(cachePath);
 
+      response.sendFile(cachePath);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Crop an arbitrary source rect — thumbnails for ML cell proposals, which
+  // have no cell id yet. Cached like cell crops (keyed by the rect).
+  router.get("/api/dies/:dieId/crop", async (request, response, next) => {
+    try {
+      const { dieId } = request.params;
+      const q = request.query;
+      const x = Math.round(Number(q.x));
+      const y = Math.round(Number(q.y));
+      const w = Math.round(Number(q.w));
+      const h = Math.round(Number(q.h));
+      if (![x, y, w, h].every(Number.isFinite) || w <= 0 || h <= 0 || w > 4096 || h > 4096) {
+        response.status(400).json({ error: "x, y, w, h (source px, w/h ≤ 4096) required" });
+        return;
+      }
+      const record = await readDieRecord(config.dataRoot, dieId);
+      const left = Math.max(0, x);
+      const top = Math.max(0, y);
+      const width = Math.min(w, record.width - left);
+      const height = Math.min(h, record.height - top);
+      if (width <= 0 || height <= 0) { response.status(400).json({ error: "Invalid crop region" }); return; }
+
+      const cacheDir = path.join(config.dataRoot, "dies", dieId, "cell-crops");
+      const cachePath = path.join(cacheDir, `rect-${left}-${top}-${width}-${height}.jpg`);
+      try {
+        await fs.access(cachePath);
+        response.sendFile(cachePath);
+        return;
+      } catch { /* cache miss */ }
+
+      const originalDir = path.join(config.dataRoot, "dies", dieId, "original");
+      const files = await fs.readdir(originalDir);
+      if (files.length === 0) { response.status(404).json({ error: "Original image not found" }); return; }
+      const originalPath = path.join(originalDir, files[0]);
+
+      await fs.mkdir(cacheDir, { recursive: true });
+      await sharp(originalPath, { limitInputPixels: false })
+        .extract({ left, top, width, height })
+        .jpeg({ quality: 90 })
+        .toFile(cachePath);
       response.sendFile(cachePath);
     } catch (error) {
       next(error);

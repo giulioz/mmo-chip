@@ -1,6 +1,8 @@
 import { useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import type { DieAnnotations, MLInferenceJob, WireLayer } from "shared";
+import type { DieAnnotations, DieMetadata, MLInferenceJob, WireLayer } from "shared";
+import type { CellLibraryView } from "../../lib/cellLibrary";
+import { DieProperties } from "./DieProperties";
 import type { ActionDispatcher } from "../../api/actions";
 import {
   exportMlData,
@@ -17,10 +19,18 @@ import {
   isMlViaId,
   type MLViasLayer
 } from "../../renderer/layers/MLViasLayer";
-import { useDieViewerStore } from "../../state/dieViewer";
+import { useDieViewerStore, type InspectorTab } from "../../state/dieViewer";
 import { usePreferences } from "../../state/preferences";
 import { WireLayerSelect } from "./WireLayerSelect";
 import { AnnotationClassSelect } from "./AnnotationClassSelect";
+import { CellDetectionPanel, ProposalInspector } from "./CellDetectionPanel";
+import { isMlCellId, type Proposal } from "../../lib/cellDetection";
+
+const TAB_LABELS: Record<InspectorTab, string> = {
+  inspector: "Inspector",
+  ml: "ML",
+  cells: "Cells"
+};
 
 /** A single labelled property row (`.prop` matches the hifi spec). */
 function Prop({
@@ -116,8 +126,14 @@ function resolve(
   id: string,
   ann: DieAnnotations,
   dispatcher: ActionDispatcher,
-  mlViasLayer: MLViasLayer | null
+  mlViasLayer: MLViasLayer | null,
+  library: CellLibraryView
 ): Resolved | null {
+  // A type shared from another die of the cell library says whose it is.
+  const ownerRow = (typeId: string): [string, ReactNode][] => {
+    const f = library.foreign.get(typeId);
+    return f ? [["from", `${f.ownerName} · ×${f.ratio.toFixed(3)}`]] : [];
+  };
   // ── ML vias (synthetic position id; no persistent annotation) ──────
   // Checked first because the prefix is unambiguous and the layer lookup
   // is cheap — keeps `parseNetPartId` and the prefix switch focused on
@@ -239,7 +255,8 @@ function resolve(
               cellType: { ...ct, name },
               prevCellType: ct
             })
-        }
+        },
+        rows: ownerRow(ct.id)
       };
     }
     case "cell": {
@@ -261,14 +278,15 @@ function resolve(
                   cellType: { ...ct, name },
                   prevCellType: ct
                 })
-            }
+            },
+            rows: ownerRow(ct.id)
           }
         : { typeLabel: "Cell", displayName: `Cell ${short(c.id)}`, uid: c.id };
       const rows: [string, string][] = [
         ["position", `(${Math.round(c.x)}, ${Math.round(c.y)})`]
       ];
       if (ct) {
-        rows.push(["size", `${ct.cropRect.width}×${ct.cropRect.height}`]);
+        rows.push(["size", `${Math.round(ct.cropRect.width)}×${Math.round(ct.cropRect.height)}`]);
       }
       rows.push(["flipped", c.flippedV ? "vertical" : "no"]);
       base.sub = { kind: "Cell", id: c.id, rows };
@@ -372,15 +390,23 @@ export function InspectorPanel({
   annotations,
   dispatcher,
   dieId,
-  mlViasLayer
+  die,
+  library,
+  mlViasLayer,
+  proposals
 }: {
   annotations: DieAnnotations | undefined;
   dispatcher: ActionDispatcher;
   dieId: string;
+  die: DieMetadata | undefined;
+  /** The die's cell library (other dies' types it shares). */
+  library: CellLibraryView;
   /** Live ML via layer — the inspector resolves `ml-via:` selection ids
    *  through it to fetch score / class. May be null while the page is still
    *  bootstrapping. */
   mlViasLayer: MLViasLayer | null;
+  /** Visible ML cell proposals — resolves `ml-cell:` selection ids. */
+  proposals: Proposal[];
 }) {
   const tab = usePreferences((s) => s.inspectorTab);
   const setTab = usePreferences((s) => s.setInspectorTab);
@@ -392,7 +418,7 @@ export function InspectorPanel({
         className="ph"
         style={{ padding: 0, gap: 0, height: 30 }}
       >
-        {(["inspector", "ml"] as const).map((k) => (
+        {(["inspector", "ml", "cells"] as const).map((k) => (
           <button
             key={k}
             type="button"
@@ -400,7 +426,7 @@ export function InspectorPanel({
             style={{ background: "transparent", cursor: "pointer" }}
             onClick={() => setTab(k)}
           >
-            {k === "inspector" ? "Inspector" : "ML"}
+            {TAB_LABELS[k]}
           </button>
         ))}
       </div>
@@ -408,12 +434,18 @@ export function InspectorPanel({
       <div style={{ flex: "1 1 auto", overflow: "auto", minHeight: 0 }}>
         {tab === "ml" ? (
           <MLPanel dieId={dieId} />
+        ) : tab === "cells" ? (
+          <CellDetectionPanel dieId={dieId} annotations={annotations} library={library} />
         ) : (
           <InspectorBody
             annotations={annotations}
             dispatcher={dispatcher}
+            dieId={dieId}
+            die={die}
+            library={library}
             ids={selectedIds}
             mlViasLayer={mlViasLayer}
+            proposals={proposals}
           />
         )}
       </div>
@@ -424,20 +456,61 @@ export function InspectorPanel({
 function InspectorBody({
   annotations,
   dispatcher,
+  dieId,
+  die,
+  library,
   ids,
-  mlViasLayer
+  mlViasLayer,
+  proposals
 }: {
   annotations: DieAnnotations | undefined;
   dispatcher: ActionDispatcher;
+  dieId: string;
+  die: DieMetadata | undefined;
+  library: CellLibraryView;
   ids: ReadonlySet<string>;
   mlViasLayer: MLViasLayer | null;
+  proposals: Proposal[];
 }) {
+  // Nothing selected: the die itself.
+  if (ids.size === 0) return <DieProperties die={die} library={library} />;
   if (!annotations) return <Empty>loading…</Empty>;
-  if (ids.size === 0) return <Empty>Nothing selected</Empty>;
-  if (ids.size > 1) return <Empty>{ids.size} items selected</Empty>;
 
-  const only = ids.values().next().value as string;
-  const r = resolve(only, annotations, dispatcher, mlViasLayer);
+  // A cell type selected from the outline tree comes with all of its placed
+  // instances (so they highlight / delete together). Keep the type's
+  // inspector up in that case and just report how many instances are in.
+  let only: string;
+  let extraRows: [string, ReactNode][] = [];
+  if (ids.size > 1) {
+    const typeIds = [...ids].filter((id) => id.startsWith("cellType:"));
+    const typeId = typeIds.length === 1 ? typeIds[0] : null;
+    const allOwnCells =
+      typeId !== null &&
+      [...ids].every((id) => {
+        if (id === typeId) return true;
+        if (!id.startsWith("cell:")) return false;
+        const c = annotations.cells.find((x) => x.id === id.slice(5));
+        return !!c && `cellType:${c.cellTypeId}` === typeId;
+      });
+    if (!allOwnCells || typeId === null) {
+      return <Empty>{ids.size} items selected</Empty>;
+    }
+    only = typeId;
+    extraRows = [["selected", `${ids.size - 1} instance${ids.size - 1 === 1 ? "" : "s"} — Delete removes them all`]];
+  } else {
+    only = ids.values().next().value as string;
+  }
+  if (isMlCellId(only)) {
+    return (
+      <ProposalInspector
+        dieId={dieId}
+        id={only}
+        dispatcher={dispatcher}
+        proposals={proposals}
+      />
+    );
+  }
+  const r = resolve(only, annotations, dispatcher, mlViasLayer, library);
   if (!r) return <Empty>Selection not found</Empty>;
 
   return (
@@ -477,7 +550,7 @@ function InspectorBody({
         </span>
       </Prop>
 
-      {r.rows?.map(([label, value]) => (
+      {[...(r.rows ?? []), ...extraRows].map(([label, value]) => (
         <Prop key={label} label={label}>
           {value}
         </Prop>
@@ -574,13 +647,8 @@ function InferenceSection({ dieId }: { dieId: string }) {
 
   const switchModel = async (name: string) => {
     if (!name || name === residentName) return;
-    if (
-      !window.confirm(
-        "Switching the model clears every cached inference result for all " +
-          "dies — you'll need to re-run inference. Continue?"
-      )
-    )
-      return;
+    // Cached predictions are per checkpoint: switching just changes which
+    // cache the viewer reads, and switching back restores the old one.
     setBusy("model");
     setErr(null);
     try {

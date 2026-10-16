@@ -20,7 +20,6 @@ import { buildNetAnnotation } from "./nets";
 import { drawCellLayers } from "./shapes";
 import {
   CELL_COLOR,
-  CELL_DETAIL_ZOOM,
   CELL_FILL_ALPHA,
   CELL_OUTLINE_ALPHA,
   CELL_OUTLINE_PX,
@@ -71,8 +70,8 @@ export interface PopulateOptions {
   /** Live getter for the cell outline/fill color. Called at draw time so
    *  color changes don't require repopulating. */
   cellColor?: () => string;
-  /** Live getter: when false, cells always render as a solid block (never the
-   *  detailed inner layer shapes), even when zoomed in. Default true. */
+  /** Live getter: when true, cells draw their detailed inner layer shapes at
+   *  every zoom; when false, always a solid block. Default true. */
   cellShowShapes?: () => boolean;
   /** Live getter for the point-via radius in **world units** (source px).
    *  When it returns a number the via is drawn at that physical size (the ML
@@ -158,8 +157,8 @@ export function buildCellAnnotation(
     height: ob.height
   };
   const layers = cellType.layers ?? {};
-  // A cell with no inner layer shapes has nothing to draw at high zoom — keep
-  // the solid block fill at every zoom so it stays visible.
+  // A cell with no inner layer shapes has nothing to draw — keep the solid
+  // block fill so it stays visible.
   const hasShapes = Object.values(layers).some((s) => s != null && s.length > 0);
 
   return {
@@ -168,10 +167,9 @@ export function buildCellAnnotation(
     pickPriority: PICK.cell,
     bbox,
     draw(ctx, bounds, state) {
-      // Draw inner shapes only when the user wants them AND zoomed in enough
-      // AND there are shapes; otherwise the cell renders as a solid block.
-      const showShapes =
-        getShowShapes() && bounds.zoom >= CELL_DETAIL_ZOOM && hasShapes;
+      // Draw inner shapes whenever the user wants them (at any zoom) and
+      // there are shapes; otherwise the cell renders as a solid block.
+      const showShapes = getShowShapes() && hasShapes;
       const color = getColor();
 
       ctx.save();
@@ -190,8 +188,8 @@ export function buildCellAnnotation(
         // itself carries the outline).
         drawCellLayers(ctx, layers, bounds, { outline: false });
       } else {
-        // Solid block so placement structure stays legible (when zoomed out,
-        // or for cells that carry no inner shapes at all).
+        // Solid block so placement structure stays legible (details off, or
+        // a cell that carries no inner shapes at all).
         ctx.fillStyle = state.selected ? SELECT_FILL : withAlpha(color, CELL_FILL_ALPHA);
         ctx.fillRect(0, 0, w, h);
       }

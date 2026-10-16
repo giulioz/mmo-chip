@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "test": "node --import tsx --test src/app.test.ts src/dieImport/importer.test.ts src/svgImport/svgWireImport.test.ts",
+    "test": "node --import tsx --test src/app.test.ts src/dieImport/importer.test.ts src/svgImport/svgWireImport.test.ts src/ml/cellDetect.test.ts src/api/cellDetection.test.ts src/ml/jobs.test.ts src/imaging/pixels.test.ts src/api/cellImaging.test.ts src/api/annotations.test.ts",
     "import-svg-wires": "tsx src/svgImport/importSvgWiresCli.ts"
   },
   "dependencies": {

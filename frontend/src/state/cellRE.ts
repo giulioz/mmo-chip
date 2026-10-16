@@ -13,6 +13,117 @@ export interface CellREClipboardItem {
   shape: LayerShape;
 }
 
+/** What ⌘C put on the shape clipboard. */
+export interface CellREClipboard {
+  /** Where the shapes were copied from: a paste back into that cell type is
+   *  offset so the copies don't hide the originals; anywhere else they land
+   *  in place. */
+  dieId: string;
+  cellTypeId: string;
+  items: CellREClipboardItem[];
+}
+
+// ── Shared clipboard ──────────────────────────────────────────────────
+//
+// The shape clipboard lives in localStorage, so every tab of the app (same
+// origin) shares it: copy in one tab, paste in another. The `storage` event
+// (bottom of this file) keeps each tab's store in step; a tab that can't
+// reach storage (blocked, full) still copies and pastes within itself.
+
+const CLIPBOARD_KEY = "mmo-chip-shape-clipboard";
+const CLIPBOARD_VERSION = 1;
+
+/** Every layer a clipboard item may name — a Record, so a new LayerType
+ *  doesn't compile until it's listed here. */
+const CLIPBOARD_LAYERS: Record<LayerType, true> = {
+  diffusion: true,
+  polysilicon: true,
+  metal1: true,
+  metal2: true,
+  contact: true,
+  via1: true,
+  wire_hitbox: true
+};
+
+export function serializeClipboard(clipboard: CellREClipboard): string {
+  return JSON.stringify({ version: CLIPBOARD_VERSION, ...clipboard });
+}
+
+/** Decode a stored clipboard. It may come from another tab running another
+ *  build, so anything from a different version, malformed or empty is
+ *  null. */
+export function parseClipboard(raw: string | null): CellREClipboard | null {
+  if (!raw) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== "object") return null;
+  const { version, dieId, cellTypeId, items } = value as Record<string, unknown>;
+  if (
+    version !== CLIPBOARD_VERSION ||
+    typeof dieId !== "string" ||
+    typeof cellTypeId !== "string" ||
+    !Array.isArray(items) ||
+    items.length === 0 ||
+    !items.every(isClipboardItem)
+  ) {
+    return null;
+  }
+  return { dieId, cellTypeId, items };
+}
+
+function isClipboardItem(value: unknown): value is CellREClipboardItem {
+  if (!value || typeof value !== "object") return false;
+  const { layer, shape } = value as { layer?: unknown; shape?: unknown };
+  if (typeof layer !== "string" || !Object.hasOwn(CLIPBOARD_LAYERS, layer)) return false;
+  if (!shape || typeof shape !== "object") return false;
+  const s = shape as Record<string, unknown>;
+  if (typeof s.id !== "string") return false;
+  const num = (v: unknown) => typeof v === "number" && Number.isFinite(v);
+  switch (s.kind) {
+    case "rect":
+      return num(s.x) && num(s.y) && num(s.width) && num(s.height);
+    case "point":
+      return num(s.x) && num(s.y) && num(s.size);
+    case "circle":
+      return num(s.x) && num(s.y) && num(s.radius);
+    case "line":
+      return num(s.x1) && num(s.y1) && num(s.x2) && num(s.y2) && num(s.width);
+    case "polygon":
+      return (
+        Array.isArray(s.points) &&
+        s.points.every((p: unknown) => {
+          const q = p as { x?: unknown; y?: unknown } | null;
+          return !!q && typeof q === "object" && num(q.x) && num(q.y);
+        })
+      );
+    default:
+      return false;
+  }
+}
+
+function readSharedClipboard(): CellREClipboard | null {
+  try {
+    if (typeof window === "undefined") return null;
+    return parseClipboard(window.localStorage.getItem(CLIPBOARD_KEY));
+  } catch {
+    return null;
+  }
+}
+
+function writeSharedClipboard(clipboard: CellREClipboard | null): void {
+  try {
+    if (typeof window === "undefined") return;
+    if (clipboard) window.localStorage.setItem(CLIPBOARD_KEY, serializeClipboard(clipboard));
+    else window.localStorage.removeItem(CLIPBOARD_KEY);
+  } catch {
+    // Storage blocked or full: the copy still works within this tab.
+  }
+}
+
 interface CellREState {
   /** The currently-selected cell type — the canvas + right panel both read
    *  off this. Null = nothing selected yet. */
@@ -53,10 +164,9 @@ interface CellREState {
    *  URL) because it's a transient pick — the cell's domain ids change on
    *  every annotation edit. */
   activeDomainId: string | null;
-  /** Shape clipboard. Cross-cell paste is the explicit goal — keeping it in
-   *  this transient store means it survives navigating between cell types in
-   *  the same session. */
-  clipboard: CellREClipboardItem[];
+  /** Shape clipboard, shared by every tab of the app (see "Shared
+   *  clipboard" above): shapes paste across tabs, dies and cell types. */
+  clipboard: CellREClipboard | null;
 }
 
 interface CellREActions {
@@ -75,7 +185,7 @@ interface CellREActions {
   setDieViewerLayersOpen: (open: boolean) => void;
   setCanvasTab: (tab: "image" | "schematic" | "logicSchematic") => void;
   setActiveDomainId: (id: string | null) => void;
-  setClipboard: (items: CellREClipboardItem[]) => void;
+  setClipboard: (clipboard: CellREClipboard | null) => void;
   reset: () => void;
 }
 
@@ -102,11 +212,12 @@ const INITIAL: CellREState = {
   dieViewerLayersOpen: true,
   canvasTab: "image",
   activeDomainId: null,
-  clipboard: []
+  clipboard: null
 };
 
 export const useCellREStore = create<CellREState & CellREActions>()((set, get) => ({
   ...INITIAL,
+  clipboard: readSharedClipboard(),
 
   setActiveCellType: (typeId, cellId = null) =>
     set({
@@ -156,12 +267,25 @@ export const useCellREStore = create<CellREState & CellREActions>()((set, get) =
   setDieViewerLayersOpen: (open) => set({ dieViewerLayersOpen: open }),
   setCanvasTab: (tab) => set({ canvasTab: tab }),
   setActiveDomainId: (id) => set({ activeDomainId: id }),
-  setClipboard: (items) => set({ clipboard: items }),
+  setClipboard: (clipboard) => {
+    writeSharedClipboard(clipboard);
+    set({ clipboard });
+  },
   reset: () => {
-    const { expandedTypes, unmatchedOpen, mlOpen } = get();
-    set({ ...INITIAL, expandedTypes, unmatchedOpen, mlOpen });
+    // The clipboard is shared with the other tabs — not this page's to drop.
+    const { expandedTypes, unmatchedOpen, mlOpen, clipboard } = get();
+    set({ ...INITIAL, expandedTypes, unmatchedOpen, mlOpen, clipboard });
   }
 }));
+
+// Another tab copied (or storage was cleared): pick up its clipboard. The
+// event only fires in the *other* tabs, never the one that wrote.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if (e.key !== null && e.key !== CLIPBOARD_KEY) return;
+    useCellREStore.setState({ clipboard: parseClipboard(e.newValue) });
+  });
+}
 
 /** Which LayerTypes are valid for each drawing tool. The point tool is
  *  restricted to via-style layers (the only kind that accepts a sole point);

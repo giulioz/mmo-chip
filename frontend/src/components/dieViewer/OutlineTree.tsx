@@ -1,3 +1,4 @@
+import { COLOR_ML_CELL } from "../../renderer/annotations/cellDetections";
 import { useMemo } from "react";
 import type { DieAnnotations } from "shared";
 import { Ic } from "../../icons";
@@ -19,6 +20,7 @@ import {
 import { useDieViewerStore } from "../../state/dieViewer";
 import { usePreferences } from "../../state/preferences";
 import { TreeRow, TreeSep } from "../tree/TreeRow";
+import { OtherDieBadge } from "../cellLibrary/OtherDieBadge";
 
 // Re-export so existing imports keep working.
 export { ANNOTATION_KIND_VALUES as ANNOTATION_KINDS };
@@ -31,6 +33,9 @@ type Props = {
   /** Base (die background) images. One per die today; the data model will
    *  grow to multiple later. Each gets independent visibility + opacity. */
   baseImages?: { id: string; name: string }[];
+  /** Cell types owned by another die of the cell library → that die's
+   *  name (badged in the cell list). */
+  foreignTypeOwners?: ReadonlyMap<string, string>;
 };
 
 /** Session-group key for the "ML Regions" parent (it spans two annotation
@@ -47,7 +52,12 @@ const GUIDES_KEY = "guides";
  *  not an AnnotationKind — they render via the image layer, not rbush). */
 const BASE_IMAGES_KEY = "base-images";
 
-export function OutlineTree({ annotations, onFocus, baseImages = [] }: Props) {
+export function OutlineTree({
+  annotations,
+  onFocus,
+  baseImages = [],
+  foreignTypeOwners
+}: Props) {
   const expandedSections = usePreferences((s) => s.expandedSections);
   const hiddenKinds = usePreferences((s) => s.hiddenKinds);
   const toggleSection = usePreferences((s) => s.toggleSectionExpanded);
@@ -69,6 +79,12 @@ export function OutlineTree({ annotations, onFocus, baseImages = [] }: Props) {
   const expandedGroups = useDieViewerStore((s) => s.expandedGroups);
   const toggleGroup = useDieViewerStore((s) => s.toggleGroup);
   const mlViasCount = useDieViewerStore((s) => s.mlViasCount);
+  const cellDetectionsCount = useDieViewerStore((s) => s.cellDetectionsCount);
+  const cellDetectionsHidden = usePreferences((s) => s.cellDetectionsHidden);
+  const setCellDetectionsHidden = usePreferences((s) => s.setCellDetectionsHidden);
+  const wireMapAvailable = useDieViewerStore((s) => s.wireMapAvailable);
+  const wireMapHidden = usePreferences((s) => s.wireMapHidden);
+  const setWireMapHidden = usePreferences((s) => s.setWireMapHidden);
 
   const cellsByType = useMemo(() => groupCellsByType(annotations), [annotations]);
   const viaTotals = useMemo(() => viaCounts(annotations), [annotations]);
@@ -175,11 +191,26 @@ export function OutlineTree({ annotations, onFocus, baseImages = [] }: Props) {
               <TreeRow
                 depth={1}
                 expand={open ? "open" : "closed"}
-                label={group.cellType.name || group.cellType.id}
+                label={
+                  foreignTypeOwners?.has(group.cellType.id) ? (
+                    <>
+                      {group.cellType.name || group.cellType.id}
+                      <OtherDieBadge owner={foreignTypeOwners.get(group.cellType.id)!} />
+                    </>
+                  ) : (
+                    group.cellType.name || group.cellType.id
+                  )
+                }
                 meta={group.cells.length}
                 selected={selectedIds.has(groupKey)}
                 onToggleExpand={() => toggleGroup(groupKey)}
-                onSelect={() => select([groupKey])}
+                // Select the type together with every placed instance: the
+                // canvas highlights them all, Delete removes them all (and
+                // the then-empty type), and the inspector keeps showing the
+                // type because the selection is "one type + only its cells".
+                onSelect={() =>
+                  select([groupKey, ...group.cells.map((c) => `cell:${c.id}`)])
+                }
                 onDoubleClick={() =>
                   focus(group.cells.map((c) => `cell:${c.id}`))
                 }
@@ -336,24 +367,62 @@ export function OutlineTree({ annotations, onFocus, baseImages = [] }: Props) {
       <TreeSep />
 
       {/* ML Results (live predictions, fetched per tile) ----------------- */}
+      {/* The parent eye works like ML Regions: it hides both overlays when
+          either is showing, and shows both when both are hidden. Each child
+          row has its own eye for independent control. */}
       <TreeRow
         expand={mlResultsOpen ? "open" : "closed"}
         label="ML Results"
-        meta={mlViasCount}
+        meta={mlViasCount + cellDetectionsCount}
         visibility={{
-          visible: !mlResultsHidden,
-          onToggle: () => setMlResultsHidden(!mlResultsHidden)
+          visible:
+            !mlResultsHidden || !cellDetectionsHidden || (wireMapAvailable && !wireMapHidden),
+          onToggle: () => {
+            const hide =
+              !mlResultsHidden || !cellDetectionsHidden || (wireMapAvailable && !wireMapHidden);
+            setMlResultsHidden(hide);
+            setCellDetectionsHidden(hide);
+            if (wireMapAvailable) setWireMapHidden(hide);
+          }
         }}
         onToggleExpand={() => toggleGroup(ML_RESULTS_KEY)}
         onSelect={() => toggleGroup(ML_RESULTS_KEY)}
       />
       {mlResultsOpen && (
-        <TreeRow
-          depth={1}
-          swatch="rgba(130, 214, 166, 0.85)"
-          label="vias"
-          meta={mlViasCount}
-        />
+        <>
+          <TreeRow
+            depth={1}
+            swatch="rgba(130, 214, 166, 0.85)"
+            label="vias"
+            meta={mlViasCount}
+            visibility={{
+              visible: !mlResultsHidden,
+              onToggle: () => setMlResultsHidden(!mlResultsHidden)
+            }}
+          />
+          <TreeRow
+            depth={1}
+            swatch={COLOR_ML_CELL}
+            label="cells"
+            meta={cellDetectionsCount}
+            visibility={{
+              visible: !cellDetectionsHidden,
+              onToggle: () => setCellDetectionsHidden(!cellDetectionsHidden)
+            }}
+          />
+          <TreeRow
+            depth={1}
+            swatch="rgb(255, 60, 0)"
+            label="wires over cells"
+            meta={wireMapAvailable ? "map" : "—"}
+            dimmed={!wireMapAvailable}
+            visibility={
+              wireMapAvailable
+                ? { visible: !wireMapHidden, onToggle: () => setWireMapHidden(!wireMapHidden) }
+                : undefined
+            }
+          />
+        </>
       )}
 
       <TreeSep />
@@ -586,7 +655,7 @@ function CellSettingsButton() {
           checked={cellShowShapes}
           onChange={(e) => setCellShowShapes(e.target.checked)}
         />
-        Show cell details when zoomed in
+        Show cell details
       </label>
     </SettingsPopover>
   );

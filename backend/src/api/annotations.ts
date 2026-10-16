@@ -6,6 +6,9 @@ import {
   writeAnnotations
 } from "../store.js";
 import type {
+  AnnotationBatchOp,
+  AnnotationBatchRequest,
+  AnnotationCollection,
   AnnotationNet,
   AnnotationNetEdge,
   AnnotationNetNode,
@@ -65,6 +68,37 @@ export function createAnnotationsRouter(config: AnnotationsRouterConfig) {
       );
       notify(dieId, rev);
       response.json({ ok: true, rev });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // One multi-entity edit (a batched undo step) as a single write: every op
+  // applies in order to the same snapshot under the die lock, then one
+  // revision — other clients never see half of it, and a malformed op
+  // writes nothing.
+  router.post("/api/dies/:dieId/batch", async (request, response, next) => {
+    const { dieId } = request.params;
+    try {
+      const ops = parseBatchOps((request.body as Partial<AnnotationBatchRequest> | undefined)?.ops);
+      if (typeof ops === "string") {
+        response.status(400).json({ error: ops });
+        return;
+      }
+      const result = await mutateAnnotations(config.dataRoot, dieId, (annotations) => {
+        const collections = annotations as unknown as Partial<
+          Record<AnnotationCollection, Array<{ id: string }>>
+        >;
+        for (const op of ops) {
+          const collection = collections[op.collection] ?? [];
+          collections[op.collection] =
+            op.op === "upsert"
+              ? upsertById(collection, op.item)
+              : removeById(collection, op.id);
+        }
+        return null;
+      });
+      sendMutationResult(response, dieId, result, notify);
     } catch (error) {
       next(error);
     }
@@ -286,6 +320,41 @@ function removeById<T extends { id: string }>(collection: T[], id: string): T[] 
 
 function isValidLayer(layer: string): layer is LayerType {
   return (VALID_LAYERS as string[]).includes(layer);
+}
+
+const BATCH_COLLECTIONS: ReadonlySet<string> = new Set<AnnotationCollection>([
+  "cells",
+  "cellTypes",
+  "nets",
+  "grids",
+  "pins",
+  "annotations",
+  "rois",
+  "ignores",
+  "guides"
+]);
+
+/** Validate a batch body's `ops` up front (so a bad op writes nothing);
+ *  returns the error message instead when malformed. */
+function parseBatchOps(raw: unknown): AnnotationBatchOp[] | string {
+  if (!Array.isArray(raw) || raw.length === 0) return "ops must be a non-empty array";
+  for (const [i, entry] of raw.entries()) {
+    if (!entry || typeof entry !== "object") return `ops[${i}]: not an object`;
+    const { op, collection, item, id } = entry as Record<string, unknown>;
+    if (typeof collection !== "string" || !BATCH_COLLECTIONS.has(collection)) {
+      return `ops[${i}]: unknown collection`;
+    }
+    if (op === "upsert") {
+      if (!item || typeof item !== "object" || typeof (item as { id?: unknown }).id !== "string") {
+        return `ops[${i}]: upsert needs an item with a string id`;
+      }
+    } else if (op === "remove") {
+      if (typeof id !== "string") return `ops[${i}]: remove needs a string id`;
+    } else {
+      return `ops[${i}]: op must be "upsert" or "remove"`;
+    }
+  }
+  return raw as AnnotationBatchOp[];
 }
 
 function registerCollectionRoutes<T extends { id: string }>(

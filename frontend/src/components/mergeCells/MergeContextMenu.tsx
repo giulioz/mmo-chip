@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import type { Proposal } from "../../lib/cellDetection";
 
 export interface ContextMenuState {
   x: number;
@@ -6,16 +7,19 @@ export interface ContextMenuState {
   cellId: string;
   /** The cell currently belongs to a matched type (unmatch is meaningful). */
   canUnmatch: boolean;
+  /** Set when the row is an ML proposal — offers Dismiss instead of Unmatch. */
+  proposal: Proposal | null;
 }
 
 interface Props {
   menu: ContextMenuState;
   onClose: () => void;
   onUnmatch: () => void;
+  onDismiss: () => void;
   onJumpToDie: () => void;
 }
 
-export function MergeContextMenu({ menu, onClose, onUnmatch, onJumpToDie }: Props) {
+export function MergeContextMenu({ menu, onClose, onUnmatch, onDismiss, onJumpToDie }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -44,16 +48,28 @@ export function MergeContextMenu({ menu, onClose, onUnmatch, onJumpToDie }: Prop
       style={{ position: "fixed", left: x, top: y, zIndex: 1000, minWidth: 180 }}
       onContextMenu={(e) => e.preventDefault()}
     >
-      <button
-        className="menu-item"
-        disabled={!menu.canUnmatch}
-        onClick={() => {
-          onUnmatch();
-          onClose();
-        }}
-      >
-        Unmatch (own new type)
-      </button>
+      {menu.proposal ? (
+        <button
+          className="menu-item"
+          onClick={() => {
+            onDismiss();
+            onClose();
+          }}
+        >
+          Dismiss proposal
+        </button>
+      ) : (
+        <button
+          className="menu-item"
+          disabled={!menu.canUnmatch}
+          onClick={() => {
+            onUnmatch();
+            onClose();
+          }}
+        >
+          Unmatch (own new type)
+        </button>
+      )}
       <button
         className="menu-item"
         onClick={() => {

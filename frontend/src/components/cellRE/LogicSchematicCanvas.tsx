@@ -181,8 +181,11 @@ export function LogicSchematicCanvas({
           const worldX = (cx - v.tx) / v.scale;
           const worldY = (cy - v.ty) / v.scale;
           return { scale: next, tx: cx - worldX * next, ty: cy - worldY * next };
+        } else if (e.shiftKey) {
+          return { ...v, tx: v.tx - e.deltaY, ty: v.ty - e.deltaX };
+        } else {
+          return { ...v, tx: v.tx - e.deltaX, ty: v.ty - e.deltaY };
         }
-        return { ...v, tx: v.tx - e.deltaX, ty: v.ty - e.deltaY };
       });
     };
     const preventGesture = (e: Event) => e.preventDefault();

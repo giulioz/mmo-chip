@@ -806,6 +806,12 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
           Math.max(1e-3, v.zoom * Math.exp(-e.deltaY * WHEEL_ZOOM_FACTOR))
         );
         viewRef.current = { zoom, ox: wx - px / zoom, oy: wy - py / zoom };
+      } else if (e.shiftKey) {
+        viewRef.current = {
+          ...v,
+          ox: v.ox + e.deltaY / v.zoom,
+          oy: v.oy + e.deltaX / v.zoom
+        };
       } else {
         viewRef.current = {
           ...v,

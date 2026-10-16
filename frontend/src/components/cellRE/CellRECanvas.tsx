@@ -1017,6 +1017,12 @@ export const CellRECanvas = forwardRef<CellRECanvasHandle, Props>(function CellR
           Math.max(1e-3, v.zoom * Math.exp(-e.deltaY * WHEEL_ZOOM_FACTOR))
         );
         viewRef.current = { zoom, ox: wx - cssX / zoom, oy: wy - cssY / zoom };
+      } else if (e.shiftKey) {
+        viewRef.current = {
+          ...v,
+          ox: v.ox + e.deltaY / v.zoom,
+          oy: v.oy + e.deltaX / v.zoom
+        };
       } else {
         viewRef.current = {
           ...v,

@@ -12,6 +12,7 @@ import type {
 import { footprint, orientOf } from "../ml/cellDetect.js";
 import { memberSignature } from "../ml/cellJobs.js";
 import { effectiveCellTypes, foreignCellTypes, instancesOn, libraryDies } from "../cellLibrary.js";
+import { HttpError } from "../security.js";
 import { readAnnotations, readDieRecord } from "../store.js";
 import type { createTileScheduler } from "../tileScheduler.js";
 import { buildSpecimen, DISPLAY_SCALE, MAX_INSTANCES, toBytes, type ForeignInstance } from "./specimen.js";
@@ -77,7 +78,7 @@ export function createCellImagingJobManager(config: {
     progress: (phase: string, f: number) => void,
     cancelled: () => boolean,
     allDies: boolean
-  ) {
+  ): Promise<string | undefined> {
     const record = await readDieRecord(dataRoot, job.dieId);
     const annotations = await readAnnotations(dataRoot, job.dieId);
     const reader = createTileReader(record, tileScheduler);
@@ -117,14 +118,25 @@ export function createCellImagingJobManager(config: {
 
     await fs.mkdir(specimensDir(dataRoot, job.dieId), { recursive: true });
     const specimens: CellSpecimenInfo[] = [];
+    // Types whose padded crop is over the region limit (big cells on a
+    // high-magnification die) are skipped rather than failing every type.
+    const tooLarge: string[] = [];
     let done = 0;
     for (const w of work) {
       if (cancelled()) return;
-      const res = await buildSpecimen(w.t, w.members, reader, { percentile: 50, foreign: w.extra }, {
-        onProgress: (f) => progress(`specimen · ${w.t.name}`, (done + f * cost(w)) / total),
-        shouldCancel: cancelled,
-        yieldToLoop
-      });
+      let res: Awaited<ReturnType<typeof buildSpecimen>>;
+      try {
+        res = await buildSpecimen(w.t, w.members, reader, { percentile: 50, foreign: w.extra }, {
+          onProgress: (f) => progress(`specimen · ${w.t.name}`, (done + f * cost(w)) / total),
+          shouldCancel: cancelled,
+          yieldToLoop
+        });
+      } catch (error) {
+        if (!(error instanceof HttpError && error.status === 413)) throw error;
+        console.warn(`[imaging:${job.dieId}] skipped specimen for ${w.t.name}: ${error.message}`);
+        tooLarge.push(w.t.name);
+        res = null;
+      }
       done += cost(w);
       if (!res) continue;
       const raw = { raw: { width: res.width, height: res.height, channels: 3 as const } };
@@ -169,6 +181,7 @@ export function createCellImagingJobManager(config: {
     for (const f of await fs.readdir(specimensDir(dataRoot, job.dieId))) {
       if (f.endsWith(".png") && !keep.has(f)) await fs.rm(`${specimensDir(dataRoot, job.dieId)}/${f}`, { force: true });
     }
+    return tooLarge.length > 0 ? `skipped ${tooLarge.join(", ")}: over the region limit` : undefined;
   }
 
   async function loadSpecimen(dieId: string, info: CellSpecimenInfo): Promise<LoadedSpecimen> {
@@ -278,11 +291,13 @@ export function createCellImagingJobManager(config: {
       emit(false);
     };
     try {
-      if (job.kind === "specimens") await runSpecimens(job, progress, () => flag.cancel, allDies);
-      else await runWireMap(job, progress, () => flag.cancel);
+      const note =
+        job.kind === "specimens"
+          ? await runSpecimens(job, progress, () => flag.cancel, allDies)
+          : await runWireMap(job, progress, () => flag.cancel);
       job.status = flag.cancel ? "stopped" : "completed";
       if (!flag.cancel) {
-        job.phase = "done";
+        job.phase = note ?? "done";
         job.percentage = 100;
       }
     } catch (error) {

@@ -458,7 +458,7 @@ function imagingLine(job: CellImagingJob | null | undefined): string {
     case "running":
       return `${what} · ${job.phase} (${job.percentage}%)`;
     case "completed":
-      return `${what} complete`;
+      return `${what} complete${job.phase && job.phase !== "done" ? ` · ${job.phase}` : ""}`;
     case "failed":
       return `${what} failed${job.error ? ` · ${job.error}` : ""}`;
     case "stopped":

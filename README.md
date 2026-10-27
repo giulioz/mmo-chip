@@ -127,6 +127,16 @@ smaller ceiling. These environment settings accept positive integers:
 | `CHIPTOOL_MAX_REGION_PIXELS` | 4,194,304 decoded pixels, including ML padding |
 | `CHIPTOOL_MAX_REGION_DIMENSION` | 4,096 pixels per side |
 | `CHIPTOOL_MAX_SIDECAR_BYTES` | 32 MiB per sidecar request |
+| `CHIPTOOL_MAX_IMAGING_REGION_PIXELS` | 16,777,216 pixels per padded cell crop in specimen and wire-map jobs |
+| `CHIPTOOL_MAX_IMAGING_REGION_DIMENSION` | 8,192 pixels per side, same jobs |
+| `CHIPTOOL_SPECIMEN_BUDGET_BYTES` | 2 GiB of float buffers while stacking one specimen |
+
+Specimen and wire-map jobs crop whole cells, which on high-magnification
+(e.g. 40×) die shots outgrow the general region limit, so they have their own
+bound. The specimen budget caps how many instances are stacked per type at
+about 48 bytes per padded pixel each (at most 128), so larger cells use fewer
+instances. A type whose crop is over the imaging limit is skipped and named
+when the job completes.
 
 Use the same region limits for backend and sidecar. `CHIPTOOL_DATA_ROOT` applies
 to both; `ML_DATA_ROOT` can override it for the sidecar. Import, tile, crop and

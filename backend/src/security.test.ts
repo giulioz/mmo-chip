@@ -178,6 +178,10 @@ test("image and ML regions are bounded before decoding or contacting the sidecar
   const { dataRoot } = await harness();
   assert.throws(() => checkRegion(4096, 4096), HttpError);
   assert.throws(() => checkRegion(Infinity, 1), HttpError);
+  // Imaging jobs crop whole cells under a larger, still finite, bound.
+  assert.doesNotThrow(() => checkRegion(3034, 1977, true));
+  assert.throws(() => checkRegion(5000, 4000, true), HttpError);
+  assert.throws(() => checkRegion(9000, 100, true), HttpError);
   const predictor = createMLPredictor({ dataRoot, mlSidecarUrl: "http://127.0.0.1:1", mlPredictPad: 0 });
   await assert.rejects(predictor.runPrediction({ originalPath: "unused", dieWidth: 100000, dieHeight: 100000,
     keep: [0, 0, 9000, 9000], threshold: 0.3, minDistance: 4, wantHeatmap: false }), (err: HttpError) => err.status === 413);

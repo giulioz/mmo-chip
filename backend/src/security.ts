@@ -140,10 +140,18 @@ export const limits = {
   imageDimension: positiveLimit("CHIPTOOL_MAX_IMAGE_DIMENSION", 100_000),
   regionPixels: positiveLimit("CHIPTOOL_MAX_REGION_PIXELS", 4_194_304),
   regionDimension: positiveLimit("CHIPTOOL_MAX_REGION_DIMENSION", 4096),
+  // Specimen and wire-map jobs crop whole cells, which on a high-magnification
+  // die outgrow the request region limit, so they get a bound of their own.
+  imagingRegionPixels: positiveLimit("CHIPTOOL_MAX_IMAGING_REGION_PIXELS", 16_777_216),
+  imagingRegionDimension: positiveLimit("CHIPTOOL_MAX_IMAGING_REGION_DIMENSION", 8192),
+  // Float buffers held at once while stacking one specimen's instances.
+  specimenBudgetBytes: positiveLimit("CHIPTOOL_SPECIMEN_BUDGET_BYTES", 2 * 1024 ** 3),
 };
-export function checkRegion(width: number, height: number): void {
+export function checkRegion(width: number, height: number, imaging = false): void {
+  const maxPixels = imaging ? limits.imagingRegionPixels : limits.regionPixels;
+  const maxDimension = imaging ? limits.imagingRegionDimension : limits.regionDimension;
   if (![width, height].every(n => Number.isSafeInteger(n) && n > 0) ||
-      width > limits.regionDimension || height > limits.regionDimension || width * height > limits.regionPixels) {
+      width > maxDimension || height > maxDimension || width * height > maxPixels) {
     throw new HttpError(413, "Image region exceeds processing limits");
   }
 }

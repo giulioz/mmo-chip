@@ -1,4 +1,5 @@
 import type { Cell, CellType } from "shared";
+import { limits } from "../security.js";
 import {
   applyParams,
   bestShift,
@@ -125,7 +126,7 @@ export async function buildSpecimen(
   // sharper photos (smaller k) ahead of coarser ones.
   // Bound simultaneous float buffers as well as the size of each crop.
   const bytesPerInstance = (W + 2 * MARGIN) * (H + 2 * MARGIN) * 48;
-  const maxInstances = Math.max(1, Math.min(MAX_INSTANCES, Math.floor(128 * 1024 * 1024 / bytesPerInstance)));
+  const maxInstances = Math.max(1, Math.min(MAX_INSTANCES, Math.floor(limits.specimenBudgetBytes / bytesPerInstance)));
   const own = pickInstances(members, maxInstances).map((cell) => ({ cell, reader, k: 1 }));
   const others = [...(options.foreign ?? [])].sort((a, b) => a.k - b.k);
   const picked = [...own, ...pickInstances(others, maxInstances - own.length)];

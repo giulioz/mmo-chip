@@ -67,6 +67,18 @@ npm run dev -w backend
 npm run dev -w frontend
 ```
 
+Large die shots import faster from the command line than through the browser
+upload. The CLI reads the file from disk, stores the original as a tiled TIFF
+(so crops and ML regions get random access), and builds the whole tile pyramid
+in one decode, so the viewer doesn't regenerate tiles lazily from a gigapixel JPEG:
+
+```sh
+npm run import-die -w backend -- /path/to/die.jpg --name my-chip
+```
+
+`--keep-original` stores the file as-is, and `--lazy-tiles` skips the pyramid build.
+Reload the frontend to see the new die.
+
 Build and test:
 
 ```sh

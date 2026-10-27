@@ -28,6 +28,12 @@ export async function importDieShot(params: {
   tileSize: number;
   limitInputPixels: number | false;
   tileConcurrency: number;
+  name?: string;
+  // Store the original as a tiled TIFF so crops and ML regions get random
+  // access instead of decoding a JPEG down to the requested rows.
+  tiledOriginal?: boolean;
+  // Build the whole tile pyramid now, in one decode, instead of lazily.
+  prebuildTiles?: boolean;
   onProgress?: (update: ImportProgressUpdate) => Promise<void> | void;
   logger?: (message: string) => void;
 }): Promise<DieRecord> {
@@ -47,7 +53,7 @@ export async function importDieShot(params: {
   params.logger?.(`analyzed ${params.originalFilename} at ${metadata.width}x${metadata.height}`);
 
   const id = crypto.randomUUID();
-  const extension = params.mimeType === "image/png" ? "png" : "jpg";
+  const extension = params.tiledOriginal ? "tif" : params.mimeType === "image/png" ? "png" : "jpg";
   const dieDir = path.join(params.dataRoot, "dies", id);
   const originalDir = path.join(dieDir, "original");
   const tilesDir = path.join(dieDir, "tiles");
@@ -56,12 +62,41 @@ export async function importDieShot(params: {
 
   const sanitizedBase = sanitizeName(path.parse(params.originalFilename).name) || "die-shot";
   const originalPath = path.join(originalDir, `${sanitizedBase}.${extension}`);
-  await fs.copyFile(params.filePath, originalPath);
 
   const maxDimension = Math.max(metadata.width, metadata.height);
   const maxZoomLevel = Math.max(0, Math.ceil(Math.log2(maxDimension / params.tileSize)));
   const levels = buildLevels(metadata.width, metadata.height, params.tileSize, maxZoomLevel);
   const totalTiles = levels.reduce((sum, level) => sum + level.columns * level.rows, 0);
+
+  try {
+    if (params.tiledOriginal) {
+      params.logger?.("writing tiled TIFF original");
+      await sharp(params.filePath, { limitInputPixels: limits.imagePixels, sequentialRead: true })
+        .tiff({ tile: true, tileWidth: 512, tileHeight: 512, compression: "deflate", predictor: "horizontal", bigtiff: true })
+        .toFile(originalPath);
+    } else {
+      await fs.copyFile(params.filePath, originalPath);
+    }
+
+    if (params.prebuildTiles) {
+      await params.onProgress?.({
+        phase: "tiling",
+        message: "Building tile pyramid",
+        totalLevels: levels.length,
+        completedLevels: 0,
+        currentLevel: null,
+        currentLevelTiles: 0,
+        currentLevelProcessedTiles: 0,
+        totalTiles,
+        processedTiles: 0
+      });
+      await buildTilePyramid({ source: originalPath, dieDir, record: { width: metadata.width, height: metadata.height, tileSize: params.tileSize, levels } });
+      params.logger?.(`built ${totalTiles} tiles across ${levels.length} levels`);
+    }
+  } catch (error) {
+    await fs.rm(dieDir, { recursive: true, force: true });
+    throw error;
+  }
 
   await params.onProgress?.({
     phase: "analyzing",
@@ -80,7 +115,7 @@ export async function importDieShot(params: {
   const timestamp = new Date().toISOString();
   const record: DieRecord = {
     id,
-    name: sanitizedBase,
+    name: params.name?.trim() || sanitizedBase,
     originalFilename: params.originalFilename,
     originalPath,
     width: metadata.width,
@@ -144,6 +179,48 @@ export function buildLevels(
       scale
     };
   });
+}
+
+/**
+ * Writes every level of the tile pyramid from a single decode of the source,
+ * using libvips' Deep Zoom writer. Deep Zoom levels halve rounding up and crop
+ * edge tiles exactly like buildLevels/ensureTileForRecord, and name tiles
+ * `col_row`, so each level maps straight onto tiles/<z>/<x>_<y>.jpg.
+ */
+export async function buildTilePyramid(params: {
+  source: string;
+  dieDir: string;
+  record: Pick<DieRecord, "width" | "height" | "tileSize" | "levels">;
+}) {
+  const { width, height, tileSize, levels } = params.record;
+  const buildDir = path.join(params.dieDir, `tiles-build-${crypto.randomBytes(4).toString("hex")}`);
+  await fs.mkdir(buildDir);
+  try {
+    await sharp(params.source, { limitInputPixels: limits.imagePixels })
+      .jpeg({ quality: 90 })
+      .tile({ size: tileSize, overlap: 0, layout: "dz" })
+      .toFile(path.join(buildDir, "pyramid.dz"));
+
+    // Deep Zoom level n is the image shrunk to fit 2^n px; ours are counted
+    // from the level that fits one tile.
+    const dzMaxLevel = Math.ceil(Math.log2(Math.max(width, height)));
+    const maxZoomLevel = levels.length - 1;
+    for (const level of levels) {
+      const from = path.join(buildDir, "pyramid_files", String(dzMaxLevel - (maxZoomLevel - level.z)));
+      const names = await fs.readdir(from);
+      if (names.length !== level.columns * level.rows) {
+        throw new Error(`Tile pyramid level ${level.z} has ${names.length} tiles, expected ${level.columns * level.rows}.`);
+      }
+      for (const name of names) {
+        await fs.rename(path.join(from, name), path.join(from, name.replace(/\.jpeg$/, ".jpg")));
+      }
+      const to = path.join(params.dieDir, "tiles", String(level.z));
+      await fs.rm(to, { recursive: true, force: true });
+      await fs.rename(from, to);
+    }
+  } finally {
+    await fs.rm(buildDir, { recursive: true, force: true });
+  }
 }
 
 export async function ensureTileForRecord(params: {

@@ -1,5 +1,6 @@
 import { Router } from "express";
 import type {
+  CellDetectionBatchStartRequest,
   CellDetectionDismissRequest,
   CellDetectionStartRequest
 } from "shared";
@@ -74,6 +75,38 @@ export function createCellDetectionRouter(config: {
             allowFlipY: flag(body.allowFlipY),
             avoidExistingCells: flag(body.avoidExistingCells),
             allDies: flag(body.allDies)
+          })
+        );
+      } catch (error) {
+        if (error instanceof CellJobBusy) {
+          response.status(409).json({ error: error.message });
+          return;
+        }
+        if (error instanceof CellJobBadRequest) {
+          response.status(400).json({ error: error.message });
+          return;
+        }
+        next(error);
+      }
+    }
+  );
+
+  router.post(
+    "/api/dies/:dieId/cell-detections/job/start-all",
+    async (request, response, next) => {
+      try {
+        const body = (request.body ?? {}) as Partial<CellDetectionBatchStartRequest>;
+        const flag = (v: unknown) => (typeof v === "boolean" ? v : undefined);
+        const minInstances =
+          typeof body.minInstances === "number" && Number.isFinite(body.minInstances)
+            ? Math.max(1, Math.floor(body.minInstances))
+            : undefined;
+        response.json(
+          await jobs.startBatch(request.params.dieId, {
+            allowFlipX: flag(body.allowFlipX),
+            allowFlipY: flag(body.allowFlipY),
+            avoidExistingCells: flag(body.avoidExistingCells),
+            minInstances
           })
         );
       } catch (error) {

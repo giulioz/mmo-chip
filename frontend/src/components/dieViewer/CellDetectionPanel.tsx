@@ -13,6 +13,7 @@ import {
   clearCellDetections,
   dismissCellDetections,
   startCellDetection,
+  startCellDetectionBatch,
   stopCellDetection,
   useCellDetectionJob,
   useCellDetections
@@ -135,6 +136,23 @@ export function CellDetectionPanel({
         });
         qc.setQueryData(cellDetectionKeys.job(dieId), next);
       }
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "cell detection failed");
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const startBatch = async () => {
+    setBusy("job");
+    setErr(null);
+    try {
+      const next = await startCellDetectionBatch(dieId, {
+        allowFlipX,
+        allowFlipY,
+        avoidExistingCells: avoidExisting
+      });
+      qc.setQueryData(cellDetectionKeys.job(dieId), next);
     } catch (e) {
       setErr(e instanceof Error ? e.message : "cell detection failed");
     } finally {
@@ -286,6 +304,19 @@ export function CellDetectionPanel({
                 : "Start detection"}
         </button>
 
+        {library.name && !running && (
+          <button
+            type="button"
+            className="btn"
+            style={{ width: "100%", cursor: "pointer", marginTop: 6 }}
+            disabled={busy !== null}
+            title={`Detect every type placed anywhere in ${library.name}, each from its instances on all of the library's dies, then keep one type per location where proposals of different types overlap`}
+            onClick={() => void startBatch()}
+          >
+            Detect all library types
+          </button>
+        )}
+
         <div className="m" style={{ fontSize: 10.5, color: "var(--ink2)", margin: "8px 0 6px" }}>
           {jobLine(job.data)}
         </div>
@@ -351,6 +382,9 @@ export function CellDetectionPanel({
                       : `from ${r.memberCount} member(s)`) +
                   ` · ${new Date(r.createdAt).toLocaleString()}` +
                   (dismissed ? ` · ${dismissed} dismissed` : "") +
+                  (r.crossTypeSuppressed
+                    ? ` · ${r.crossTypeSuppressed} lost to a better-fitting type at the same place`
+                    : "") +
                   (r.options
                     ? ` · flips: ${r.options.allowFlipX ? "X" : ""}${r.options.allowFlipY ? "Y" : ""}`.replace(/: $/, ": none") +
                       (r.options.avoidExistingCells === false ? " · overlaps allowed" : "")
@@ -763,11 +797,15 @@ function CellImagingSection({
 
 function jobLine(job: CellDetectionJob | null | undefined): string {
   if (!job) return "Idle";
+  const b = job.batch;
+  const skipped = b?.skipped ? ` · ${b.skipped} skipped` : "";
   switch (job.status) {
     case "running":
-      return `Running · ${job.cellTypeName} · ${job.phase} (${job.percentage}%)`;
+      return b && b.total > 0
+        ? `Running · type ${Math.min(b.done + 1, b.total)}/${b.total} · ${job.cellTypeName} · ${job.phase} (${job.percentage}%)`
+        : `Running · ${job.cellTypeName} · ${job.phase} (${job.percentage}%)`;
     case "completed":
-      return `Complete · ${job.cellTypeName} · ${job.detections ?? 0} proposals`;
+      return `Complete · ${job.cellTypeName} · ${job.detections ?? 0} proposals${skipped}`;
     case "failed":
       return `Failed · ${job.cellTypeName}${job.error ? ` · ${job.error}` : ""}`;
     case "stopped":

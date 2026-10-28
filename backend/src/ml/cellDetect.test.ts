@@ -10,6 +10,7 @@ import {
   ORIENTATIONS,
   orientationsFor,
   orientOf,
+  resolveAcrossTypes,
   scorePlacement,
   toCanonical,
   ViaIndex,
@@ -277,4 +278,55 @@ test("detectCells honours cancellation", async () => {
   const tpl = buildTemplate([{ id: "a", cellTypeId: "t", x: 100, y: 100 }], TYPE, index);
   const found = await detectCells(tpl, TYPE, index, [], {}, { shouldCancel: () => true });
   assert.deepEqual(found, []);
+});
+
+test("ViaIndex queries match a brute-force scan, at the die edges too", () => {
+  const vias: { x: number; y: number; score: number }[] = [];
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  for (let i = 0; i < 2000; i++) vias.push({ x: rnd() * 1000, y: rnd() * 700, score: rnd() });
+  vias.push({ x: 0, y: 0, score: 1 }, { x: 1000, y: 700, score: 1 });
+  const index = new ViaIndex(vias);
+  const at = (i: number) => ({ x: index.xs[i], y: index.ys[i] });
+  for (const box of [
+    { x0: -50, y0: -50, x1: 40, y1: 30 },
+    { x0: 310, y0: 200, x1: 480, y1: 333 },
+    { x0: 900, y0: 600, x1: 1200, y1: 900 },
+    { x0: 2000, y0: 2000, x1: 2100, y1: 2100 }
+  ]) {
+    const want = vias.filter((v) => v.x >= box.x0 && v.x <= box.x1 && v.y >= box.y0 && v.y <= box.y1).length;
+    const got = index.inBox(box);
+    assert.equal(got.length, want);
+    for (const i of got) {
+      const p = at(i);
+      assert.ok(p.x >= box.x0 && p.x <= box.x1 && p.y >= box.y0 && p.y <= box.y1);
+    }
+  }
+  for (const [x, y, tol] of [[0, 0, 5], [500, 350, 40], [1003, 702, 8], [-20, 400, 30]]) {
+    let want = Infinity;
+    for (const v of vias) {
+      const d = Math.hypot(v.x - x, v.y - y);
+      if (d <= tol) want = Math.min(want, d);
+    }
+    const j = index.nearest(x, y, tol);
+    if (want === Infinity) assert.equal(j, -1);
+    else assert.ok(Math.abs(Math.hypot(at(j).x - x, at(j).y - y) - want) < 1e-9);
+  }
+});
+
+test("resolveAcrossTypes keeps the cell that explains its footprint", () => {
+  const box = (x0: number, w: number) => ({ x0, y0: 0, x1: x0 + w, y1: 100 });
+  const kept = resolveAcrossTypes([
+    // A big cell with every via found, and a small type's template matching
+    // its left part: the big one wins.
+    { box: box(0, 300), score: 0.95, matched: 40, extra: 2, templateVias: 42 },
+    { box: box(10, 80), score: 1, matched: 10, extra: 0, templateVias: 10 },
+    // A clean small cell, and a big type half-matching over it: the small
+    // one wins, though both find the same 10 vias.
+    { box: box(1000, 80), score: 1, matched: 10, extra: 0, templateVias: 10 },
+    { box: box(940, 300), score: 0.6, matched: 10, extra: 0, templateVias: 20 },
+    // Abutting the big cell with a sliver of overlap: kept.
+    { box: box(295, 80), score: 0.9, matched: 9, extra: 1, templateVias: 10 }
+  ]);
+  assert.deepEqual([...kept].sort(), [0, 2, 4]);
 });

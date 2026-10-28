@@ -471,3 +471,81 @@ test("pooling a type's instances from every die of the library into one template
   const [d] = strong;
   assert.ok(Math.abs(d.x - 330) <= 2 && Math.abs(d.y - 100) <= 2, JSON.stringify(d));
 });
+
+test("a batch detects every library type, keeping one type per location", async () => {
+  const { app, dataRoot } = await createHarness();
+  const ownerId = await importDie(app);
+  const dieId = await importDie(app);
+  await request(app).patch(`/api/dies/${ownerId}`).send({ cellLibrary: "lib" }).expect(200);
+  await request(app).patch(`/api/dies/${dieId}`).send({ cellLibrary: "lib" }).expect(200);
+  // BIG's left part is SMALL's whole via pattern.
+  const right = [
+    { x: 74, y: 6 },
+    { x: 96, y: 30 },
+    { x: 118, y: 12 },
+    { x: 84, y: 60 },
+    { x: 126, y: 70 },
+    { x: 104, y: 50 }
+  ];
+  const BW = 140;
+  const big = { id: "big", name: "BIG", cropRect: { x: 0, y: 0, width: BW, height: H } };
+  const small = { id: "small", name: "SMALL", cropRect: { x: 0, y: 0, width: W, height: H } };
+  // A type nobody placed is left out of the batch.
+  const unplaced = { id: "none", name: "NONE", cropRect: { x: 0, y: 0, width: W, height: H } };
+  await fs.writeFile(
+    path.join(dataRoot, "dies", ownerId, "annotations.json"),
+    JSON.stringify({
+      version: 2, rev: 1, nets: [], grids: [], cellTypes: [big, small, unplaced],
+      cells: [
+        { id: "b1", cellTypeId: "big", x: 20, y: 20 },
+        { id: "s1", cellTypeId: "small", x: 300, y: 20 }
+      ]
+    })
+  );
+  const at = (pts: { x: number; y: number }[], x: number, y: number) =>
+    pts.map((p) => ({ x: x + p.x, y: y + p.y, score: 0.9 }));
+  await writeVias(app, dataRoot, ownerId, [
+    ...at(PATTERN, 20, 20),
+    ...at(right, 20, 20),
+    ...at(PATTERN, 300, 20)
+  ]);
+  // Unlabelled here: one BIG, one SMALL on its own.
+  await writeVias(app, dataRoot, dieId, [
+    ...at(PATTERN, 30, 120),
+    ...at(right, 30, 120),
+    ...at(PATTERN, 380, 100)
+  ]);
+
+  const start = await request(app).post(`/api/dies/${dieId}/cell-detections/job/start-all`).send({ allowFlipX: false, allowFlipY: false });
+  assert.equal(start.status, 200, JSON.stringify(start.body));
+  assert.equal(start.body.status, "running");
+  assert.ok(start.body.batch);
+  const busy = await request(app).post(`/api/dies/${dieId}/cell-detections/job/start-all`).send({});
+  assert.equal(busy.status, 409);
+  const job = await waitForJob(app, dieId);
+  assert.equal(job.status, "completed", job.error ?? "");
+  assert.deepEqual(job.batch, { done: 2, total: 2, skipped: 0 });
+
+  const results = (await request(app).get(`/api/dies/${dieId}/cell-detections`)).body as CellDetectionResult[];
+  const byType = new Map(results.map((r) => [r.cellTypeId, r]));
+  assert.deepEqual([...byType.keys()].sort(), ["big", "small"]);
+  for (const r of results) {
+    assert.equal(r.cellTypeDieId, ownerId);
+    assert.equal(r.options?.allDies, true);
+  }
+  const near = (r: CellDetectionResult, x: number, y: number) =>
+    r.detections.filter((d) => d.score >= 0.9 && Math.abs(d.x - x) <= 2 && Math.abs(d.y - y) <= 2);
+  assert.equal(near(byType.get("big")!, 30, 120).length, 1, "BIG found");
+  assert.equal(near(byType.get("small")!, 380, 100).length, 1, "lone SMALL found");
+  // SMALL's match inside BIG lost to BIG.
+  assert.equal(near(byType.get("small")!, 30, 120).length, 0, "SMALL inside BIG dropped");
+  assert.ok((byType.get("small")!.crossTypeSuppressed ?? 0) >= 1);
+  // No two kept proposals of different types sit on each other.
+  for (const d of byType.get("small")!.detections) {
+    for (const b of byType.get("big")!.detections) {
+      const ix = Math.min(d.x + W, b.x + BW) - Math.max(d.x, b.x);
+      const iy = Math.min(d.y + H, b.y + H) - Math.max(d.y, b.y);
+      assert.ok(ix <= 0 || iy <= 0 || ix * iy <= 0.5 * W * H, JSON.stringify([d, b]));
+    }
+  }
+});

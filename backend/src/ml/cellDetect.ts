@@ -185,66 +185,124 @@ function area(r: RectBox): number {
   return Math.max(0, r.x1 - r.x0) * Math.max(0, r.y1 - r.y0);
 }
 
+/** Uniform-grid bucket of boxes, so "does anything overlap this box" costs
+ *  the boxes nearby rather than every box on the die. A box sits in every
+ *  bucket it touches; `near` may yield one box more than once. */
+export class BoxGrid<T extends { box: RectBox }> {
+  private readonly buckets = new Map<number, T[]>();
+
+  constructor(private readonly cellSize: number) {}
+
+  private *keys(box: RectBox): Generator<number> {
+    const s = this.cellSize;
+    // Offsets keep slightly-negative coords (edge placements) valid keys.
+    for (let gy = Math.floor(box.y0 / s); gy <= Math.floor(box.y1 / s); gy++) {
+      for (let gx = Math.floor(box.x0 / s); gx <= Math.floor(box.x1 / s); gx++) {
+        yield (gy + 1024) * 1_048_576 + (gx + 1024);
+      }
+    }
+  }
+
+  add(item: T): void {
+    for (const k of this.keys(item.box)) {
+      const b = this.buckets.get(k);
+      if (b) b.push(item);
+      else this.buckets.set(k, [item]);
+    }
+  }
+
+  /** Every stored item whose bucket `box` touches. */
+  *near(box: RectBox): Generator<T> {
+    for (const k of this.keys(box)) {
+      const b = this.buckets.get(k);
+      if (b) yield* b;
+    }
+  }
+}
+
 // ── Spatial index over the die's vias ─────────────────────────────────
 
 /** Uniform-grid index over a flat via list. Built once per run; every
  *  neighbourhood query (template refinement, footprint counts) goes through
  *  it so scoring stays O(candidates × template) instead of O(candidates ×
- *  dieVias). */
+ *  dieVias). The grid is CSR: vias are stored sorted by bucket (row-major),
+ *  `starts[b]..starts[b + 1]` being bucket b's — so an index `i` is a
+ *  position in that order, not in the input list. */
 export class ViaIndex {
   readonly xs: Float64Array;
   readonly ys: Float64Array;
   readonly scores: Float64Array;
   readonly size: number;
   private readonly cellSize: number;
-  private readonly grid = new Map<number, number[]>();
+  private readonly cols: number;
+  private readonly rows: number;
+  private readonly starts: Int32Array;
 
   constructor(
     vias: ReadonlyArray<{ x: number; y: number; score: number }>,
     cellSize = 32,
   ) {
-    this.size = vias.length;
-    this.xs = new Float64Array(vias.length);
-    this.ys = new Float64Array(vias.length);
-    this.scores = new Float64Array(vias.length);
+    const n = vias.length;
+    this.size = n;
     this.cellSize = cellSize;
-    for (let i = 0; i < vias.length; i++) {
+    let maxX = 0;
+    let maxY = 0;
+    for (const v of vias) {
+      if (v.x > maxX) maxX = v.x;
+      if (v.y > maxY) maxY = v.y;
+    }
+    // Column/row 0 is gx = -1 (edge tolerance); die coords are non-negative.
+    this.cols = Math.floor(maxX / cellSize) + 3;
+    this.rows = Math.floor(maxY / cellSize) + 3;
+    const bucketOf = new Int32Array(n);
+    const counts = new Int32Array(this.cols * this.rows + 1);
+    for (let i = 0; i < n; i++) {
       const v = vias[i];
-      this.xs[i] = v.x;
-      this.ys[i] = v.y;
-      this.scores[i] = v.score;
-      const key = this.key(
-        Math.floor(v.x / cellSize),
-        Math.floor(v.y / cellSize),
-      );
-      const bucket = this.grid.get(key);
-      if (bucket) bucket.push(i);
-      else this.grid.set(key, [i]);
+      const b = this.bucket(Math.floor(v.x / cellSize), Math.floor(v.y / cellSize));
+      bucketOf[i] = b;
+      counts[b + 1] += 1;
+    }
+    for (let b = 1; b < counts.length; b++) counts[b] += counts[b - 1];
+    this.starts = counts;
+    const fill = counts.slice(0, counts.length - 1);
+    this.xs = new Float64Array(n);
+    this.ys = new Float64Array(n);
+    this.scores = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      const at = fill[bucketOf[i]]++;
+      const v = vias[i];
+      this.xs[at] = v.x;
+      this.ys[at] = v.y;
+      this.scores[at] = v.score;
     }
   }
 
-  private key(gx: number, gy: number): number {
-    // Die coords are non-negative; +1 keeps gx = -1 (edge tolerance) valid.
-    return (gx + 1) * 1_048_576 + (gy + 1);
+  private bucket(gx: number, gy: number): number {
+    return (gy + 1) * this.cols + (gx + 1);
+  }
+
+  /** Grid range covering [lo, hi] on one axis, clamped to the grid. */
+  private span(lo: number, hi: number, cells: number): [number, number] {
+    return [
+      Math.max(-1, Math.floor(lo / this.cellSize)),
+      Math.min(cells - 2, Math.floor(hi / this.cellSize)),
+    ];
   }
 
   /** Indices of vias whose centre lies inside the closed box. */
   inBox(box: RectBox): number[] {
     const out: number[] = [];
-    const gx0 = Math.floor(box.x0 / this.cellSize);
-    const gy0 = Math.floor(box.y0 / this.cellSize);
-    const gx1 = Math.floor(box.x1 / this.cellSize);
-    const gy1 = Math.floor(box.y1 / this.cellSize);
-    for (let gx = gx0; gx <= gx1; gx++) {
-      for (let gy = gy0; gy <= gy1; gy++) {
-        const bucket = this.grid.get(this.key(gx, gy));
-        if (!bucket) continue;
-        for (const i of bucket) {
-          const x = this.xs[i];
-          const y = this.ys[i];
-          if (x >= box.x0 && x <= box.x1 && y >= box.y0 && y <= box.y1)
-            out.push(i);
-        }
+    const [gx0, gx1] = this.span(box.x0, box.x1, this.cols);
+    const [gy0, gy1] = this.span(box.y0, box.y1, this.rows);
+    for (let gy = gy0; gy <= gy1; gy++) {
+      // A row's buckets are contiguous, so one scan covers gx0..gx1.
+      const from = this.starts[this.bucket(gx0, gy)];
+      const to = this.starts[this.bucket(gx1, gy) + 1];
+      for (let i = from; i < to; i++) {
+        const x = this.xs[i];
+        const y = this.ys[i];
+        if (x >= box.x0 && x <= box.x1 && y >= box.y0 && y <= box.y1)
+          out.push(i);
       }
     }
     return out;
@@ -252,24 +310,20 @@ export class ViaIndex {
 
   /** Nearest via within `tol` of (x, y), or -1. */
   nearest(x: number, y: number, tol: number): number {
-    const gx0 = Math.floor((x - tol) / this.cellSize);
-    const gy0 = Math.floor((y - tol) / this.cellSize);
-    const gx1 = Math.floor((x + tol) / this.cellSize);
-    const gy1 = Math.floor((y + tol) / this.cellSize);
+    const [gx0, gx1] = this.span(x - tol, x + tol, this.cols);
+    const [gy0, gy1] = this.span(y - tol, y + tol, this.rows);
     let best = -1;
     let bestD2 = tol * tol;
-    for (let gx = gx0; gx <= gx1; gx++) {
-      for (let gy = gy0; gy <= gy1; gy++) {
-        const bucket = this.grid.get(this.key(gx, gy));
-        if (!bucket) continue;
-        for (const i of bucket) {
-          const dx = this.xs[i] - x;
-          const dy = this.ys[i] - y;
-          const d2 = dx * dx + dy * dy;
-          if (d2 <= bestD2) {
-            bestD2 = d2;
-            best = i;
-          }
+    for (let gy = gy0; gy <= gy1; gy++) {
+      const from = this.starts[this.bucket(gx0, gy)];
+      const to = this.starts[this.bucket(gx1, gy) + 1];
+      for (let i = from; i < to; i++) {
+        const dx = this.xs[i] - x;
+        const dy = this.ys[i] - y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 <= bestD2) {
+          bestD2 = d2;
+          best = i;
         }
       }
     }
@@ -618,6 +672,8 @@ export async function detectCells(
     box: RectBox;
   }
   const raw: Raw[] = [];
+  const existingGrid = new BoxGrid<{ box: RectBox }>(512);
+  for (const box of existing) existingGrid.add({ box });
   const orientations = orientationsFor(options);
   const nOrient = orientations.length;
 
@@ -692,22 +748,33 @@ export async function detectCells(
         // ── Refine: nearest-neighbour centroid, then rescore ─────────
         let X = (bx - offX) * binSize;
         let Y = (by - offY) * binSize;
+        let weak = false;
         for (let pass = 0; pass < 2; pass++) {
           let sx = 0;
           let sy = 0;
           let n = 0;
           const searchTol = pass === 0 ? binSize * 1.5 : tol;
-          for (const t of oriented) {
+          for (let k = 0; k < oriented.length; k++) {
+            // Pass 0 gives up as soon as the floor is out of reach.
+            if (pass === 0 && n + oriented.length - k < minMatched) break;
+            const t = oriented[k];
             const j = index.nearest(X + t.x, Y + t.y, searchTol);
             if (j < 0) continue;
             sx += index.xs[j] - (X + t.x);
             sy += index.ys[j] - (Y + t.y);
             n += 1;
           }
+          // Most peaks are chance alignments of a few vias: if even the
+          // loose first pass can't reach the scoring floor, skip the rest.
+          if (pass === 0 && n < minMatched) {
+            weak = true;
+            break;
+          }
           if (n === 0) break;
           X += sx / n;
           Y += sy / n;
         }
+        if (weak) continue;
 
         // ── Score ────────────────────────────────────────────────────
         const box = footprint(X, Y, o, W, H);
@@ -722,7 +789,7 @@ export async function detectCells(
         // ── Existing cells ───────────────────────────────────────────
         const own = area(box);
         let clash = false;
-        for (const e of existing) {
+        for (const { box: e } of existingGrid.near(box)) {
           if (intersectionArea(box, e) > maxExistingOverlap * own) {
             clash = true;
             break;
@@ -748,10 +815,11 @@ export async function detectCells(
   // ── Non-maximum suppression ──────────────────────────────────────
   raw.sort((a, b) => b.score - a.score || a.oi - b.oi);
   const accepted: Raw[] = [];
+  const acceptedGrid = new BoxGrid<Raw>(Math.max(64, ext));
   for (const r of raw) {
     const own = area(r.box);
     let dup = false;
-    for (const a of accepted) {
+    for (const a of acceptedGrid.near(r.box)) {
       const inter = intersectionArea(r.box, a.box);
       if (inter === 0) continue;
       // Overlap relative to the *smaller* footprint, not IoU: two proposals
@@ -765,7 +833,10 @@ export async function detectCells(
         break;
       }
     }
-    if (!dup) accepted.push(r);
+    if (!dup) {
+      accepted.push(r);
+      acceptedGrid.add(r);
+    }
   }
 
   return accepted.map((r) => {
@@ -782,4 +853,60 @@ export async function detectCells(
     if (o.rotation !== 0) out.rotation = o.rotation;
     return out;
   });
+}
+
+// ── Across types ──────────────────────────────────────────────────────
+
+/** A detection of some type, with its die footprint and its type's template
+ *  size, for `resolveAcrossTypes`. */
+export interface TypedCandidate {
+  box: RectBox;
+  score: number;
+  matched: number;
+  extra: number;
+  templateVias: number;
+}
+
+/** Vias a candidate explains minus those that contradict it: die vias in its
+ *  footprint it doesn't account for, and template vias with no die via. */
+const netVias = (c: TypedCandidate) =>
+  c.matched - c.extra - Math.max(0, c.templateVias - c.matched);
+
+/**
+ * Greedy NMS across cell types, for a batch that detects every type of a
+ * library at once: a small cell's template (an inverter, say) also matches
+ * inside every bigger cell that contains the same via sub-pattern, and two
+ * types of one library can be the same cell. Candidates are ranked by
+ * `netVias`, so a big cell that accounts for its whole footprint beats a
+ * sub-pattern of it, while a partial match of a big cell over a small one
+ * (half its template missing) loses to the small one. A candidate
+ * overlapping a kept one by more than `maxOverlap` of the smaller footprint
+ * is dropped. Returns the kept candidates' indices into `candidates`.
+ */
+export function resolveAcrossTypes(
+  candidates: ReadonlyArray<TypedCandidate>,
+  maxOverlap = 0.5,
+): Set<number> {
+  const net = candidates.map(netVias);
+  const order = candidates
+    .map((_, i) => i)
+    .sort((a, b) => net[b] - net[a] || candidates[b].score - candidates[a].score || a - b);
+  const kept = new Set<number>();
+  const grid = new BoxGrid<{ box: RectBox }>(1024);
+  for (const i of order) {
+    const box = candidates[i].box;
+    const own = area(box);
+    let dup = false;
+    for (const k of grid.near(box)) {
+      const inter = intersectionArea(box, k.box);
+      if (inter > 0 && inter / Math.min(own, area(k.box)) > maxOverlap) {
+        dup = true;
+        break;
+      }
+    }
+    if (dup) continue;
+    kept.add(i);
+    grid.add({ box });
+  }
+  return kept;
 }

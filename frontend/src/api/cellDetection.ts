@@ -5,6 +5,7 @@ import {
   type UseQueryResult
 } from "@tanstack/react-query";
 import type {
+  CellDetectionBatchStartRequest,
   CellDetectionDismissRequest,
   CellDetectionJob,
   CellDetectionResult,
@@ -83,6 +84,20 @@ export function startCellDetection(
   const body: CellDetectionStartRequest = { cellTypeId, ...options };
   return apiPost<CellDetectionJob>(
     `/api/dies/${dieId}/cell-detections/job/start`,
+    body
+  );
+}
+
+/** Detect every type with placed instances anywhere in the die's cell
+ *  library in one job (templates pooled across its dies), keeping one type
+ *  per location where their proposals overlap. */
+export function startCellDetectionBatch(
+  dieId: string,
+  options: { allowFlipX: boolean; allowFlipY: boolean; avoidExistingCells: boolean }
+): Promise<CellDetectionJob> {
+  const body: CellDetectionBatchStartRequest = options;
+  return apiPost<CellDetectionJob>(
+    `/api/dies/${dieId}/cell-detections/job/start-all`,
     body
   );
 }

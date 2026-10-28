@@ -688,6 +688,10 @@ export interface CellDetectionResult {
   detections: CellDetection[];
   /** Detection ids the user explicitly rejected in merge-cells. */
   dismissed: string[];
+  /** Set when the run was part of a batch over every library type: how many
+   *  of this type's candidates lost to a better-fitting type's at the same
+   *  place (and were dropped). */
+  crossTypeSuppressed?: number;
 }
 
 export type CellDetectionJobStatus =
@@ -700,8 +704,13 @@ export type CellDetectionJobStatus =
  *  fixed for the run's lifetime. Broadcast over WS as `cellJob`. */
 export interface CellDetectionJob {
   dieId: string;
+  /** The type being detected; for a batch, the one currently matching. */
   cellTypeId: string;
   cellTypeName: string;
+  /** Set on a batch over every cell type the die can see (its own and its
+   *  cell library's): types finished so far, of how many, and those skipped
+   *  (no via sweep for their instances, too few template vias). */
+  batch?: { done: number; total: number; skipped: number };
   status: CellDetectionJobStatus;
   /** Human-readable stage: "loading vias", "matching", "scoring". */
   phase: string;
@@ -738,6 +747,18 @@ export interface CellDetectionStartRequest {
   allowFlipY?: boolean;
   avoidExistingCells?: boolean;
   allDies?: boolean;
+}
+
+/** Detect every cell type with placed instances anywhere in the die's cell
+ *  library (templates pooled across all its dies, like `allDies`), then keep
+ *  one type per location where their proposals overlap. */
+export interface CellDetectionBatchStartRequest {
+  allowFlipX?: boolean;
+  allowFlipY?: boolean;
+  avoidExistingCells?: boolean;
+  /** Skip types with fewer placed instances than this across the library.
+   *  Default 1. */
+  minInstances?: number;
 }
 
 export interface CellDetectionDismissRequest {

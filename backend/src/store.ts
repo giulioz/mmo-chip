@@ -45,17 +45,13 @@ export async function writeDieRecord(dataRoot: string, record: DieRecord) {
   validateRecord(dataRoot, record.id, record);
   const dieDir = dataPath(dataRoot, "dies", safeId(record.id));
   await fs.mkdir(dieDir, { recursive: true });
-  await fs.writeFile(
-    dataPath(dataRoot, "dies", record.id, "metadata.json"),
-    `${JSON.stringify(record, null, 2)}\n`,
-    "utf8"
-  );
+  await writeJsonAtomic(dataPath(dataRoot, "dies", record.id, "metadata.json"), record);
 
   const indexPath = dataPath(dataRoot, "index.json");
   const index = await readJson<DieIndex>(indexPath, EMPTY_DIE_INDEX);
   if (!index.dies.includes(record.id)) {
     index.dies.push(record.id);
-    await fs.writeFile(indexPath, `${JSON.stringify(index, null, 2)}\n`, "utf8");
+    await writeJsonAtomic(indexPath, index);
   }
 }
 
@@ -67,7 +63,7 @@ export async function deleteDieRecord(dataRoot: string, dieId: string) {
   const index = await readJson<DieIndex>(indexPath, EMPTY_DIE_INDEX);
   const nextDies = index.dies.filter((id) => id !== dieId);
   if (nextDies.length !== index.dies.length) {
-    await fs.writeFile(indexPath, `${JSON.stringify({ dies: nextDies }, null, 2)}\n`, "utf8");
+    await writeJsonAtomic(indexPath, { dies: nextDies });
   }
 }
 
@@ -92,17 +88,13 @@ export async function readImportJob(
 
 export async function writeImportJob(dataRoot: string, job: ImportJobRecord) {
   validateImportJob(dataRoot, job.id, job);
-  await fs.writeFile(
-    dataPath(dataRoot, "jobs", `${job.id}.json`),
-    `${JSON.stringify(job, null, 2)}\n`,
-    "utf8"
-  );
+  await writeJsonAtomic(dataPath(dataRoot, "jobs", `${job.id}.json`), job);
 
   const indexPath = dataPath(dataRoot, "jobs", "index.json");
   const index = await readJson<ImportJobIndex>(indexPath, EMPTY_JOB_INDEX);
   if (!index.jobs.includes(job.id)) {
     index.jobs.push(job.id);
-    await fs.writeFile(indexPath, `${JSON.stringify(index, null, 2)}\n`, "utf8");
+    await writeJsonAtomic(indexPath, index);
   }
 }
 
@@ -125,11 +117,7 @@ export async function deleteImportJobsForDie(dataRoot: string, dieId: string) {
     const remainingJobs = index.jobs.filter(
       (jobId) => !jobsToDelete.some((job) => job.jobId === jobId)
     );
-    await fs.writeFile(
-      indexPath,
-      `${JSON.stringify({ jobs: remainingJobs }, null, 2)}\n`,
-      "utf8"
-    );
+    await writeJsonAtomic(indexPath, { jobs: remainingJobs });
   }
 }
 
@@ -169,13 +157,9 @@ export async function writeMLJob(
   job: MLInferenceJob
 ): Promise<void> {
   await fs.mkdir(dataPath(dataRoot, "ml-jobs"), { recursive: true });
-  // Atomic (tmp + rename): a sweep persists progress on every tick without
-  // awaiting, so plain writeFile calls can interleave and a concurrent
-  // reader would see one body partially overwritten by another.
-  const file = dataPath(dataRoot, "ml-jobs", `${safeId(job.dieId)}.json`);
-  const tmp = `${file}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
-  await fs.writeFile(tmp, `${JSON.stringify(job, null, 2)}\n`, "utf8");
-  await fs.rename(tmp, file);
+  // A sweep persists progress on every tick without awaiting, so the writes
+  // must be atomic or one body could be partially overwritten by another.
+  await writeJsonAtomic(dataPath(dataRoot, "ml-jobs", `${safeId(job.dieId)}.json`), job);
 }
 
 /** Drop every persisted ML job — used when the model changes (the old jobs'
@@ -216,14 +200,14 @@ export async function writeAnnotations(
   const nextRev = (annotations.rev ?? 0) + 1;
   const stamped: DieAnnotations = { ...annotations, rev: nextRev };
   const filePath = dataPath(dataRoot, "dies", safeId(dieId), "annotations.json");
-  await fs.writeFile(filePath, `${JSON.stringify(stamped, null, 2)}\n`, "utf8");
+  await writeJsonAtomic(filePath, stamped);
   return nextRev;
 }
 
 // Per-die mutex: serializes any read-modify-write cycle on a die's files.
 // In-process only (single Node instance). Reads via readAnnotations are not
-// gated since fs.writeFile is atomic at the OS level — a concurrent reader
-// sees either pre- or post-write content, never torn JSON.
+// gated since writes go through writeJsonAtomic — a concurrent reader sees
+// either pre- or post-write content, never torn JSON.
 const dieLocks = new Map<string, Promise<unknown>>();
 
 export async function withDieLock<T>(dieId: string, fn: () => Promise<T>): Promise<T> {
@@ -266,7 +250,24 @@ async function writeJsonIfMissing(filePath: string, value: unknown) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       throw error;
     }
-    await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await writeJsonAtomic(filePath, value);
+  }
+}
+
+/**
+ * Write to a unique sibling tmp file, then rename over the target. A plain
+ * writeFile truncates first, so a crash or `tsx watch` restart mid-write
+ * leaves a cut-off file that no longer parses (this once truncated a die's
+ * annotations.json at 1.5 MiB); rename replaces the file in one step.
+ */
+async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
+  const tmp = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+  try {
+    await fs.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await fs.rename(tmp, filePath);
+  } catch (error) {
+    await fs.rm(tmp, { force: true });
+    throw error;
   }
 }
 

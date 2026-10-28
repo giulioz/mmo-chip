@@ -11,8 +11,11 @@ import {
   buildRotateCellTypeAction,
   orientOf,
   orientOnDie,
+  recroppedCellType,
+  recroppedMember,
   rotateView,
-  type Orient
+  type Orient,
+  type RecropBox
 } from "./mergeCells";
 
 const ORIENTS: Orient[] = [];
@@ -193,7 +196,77 @@ test("flipping a type keeps every member and every shape on the same die pixels"
   assert.equal(buildFlipCellTypeAction({ ...annotations, cells: [] }, cellType, "h"), null);
 });
 
-test("data built before a type-wide flip or turn is out of frame; member edits aren't", () => {
+/** The type and its members after a recrop to `box`. */
+function recropped(annotations: DieAnnotations, cellType: CellType, box: RecropBox): DieAnnotations {
+  return {
+    ...annotations,
+    cellTypes: annotations.cellTypes.map((t) => (t.id === cellType.id ? recroppedCellType(t, box) : t)),
+    cells: annotations.cells.map((c) =>
+      c.cellTypeId === cellType.id ? recroppedMember(c, box, W, H) : c
+    )
+  };
+}
+
+test("recropping a type keeps every member, in every orientation, and every shape on the same die pixels", () => {
+  const { annotations, cellType } = fixture();
+  const boxes: RecropBox[] = [
+    { x: -4, y: 3, width: 40, height: 12 }, // grow left/right, trim top/bottom
+    { x: 2, y: 1, width: 25, height: 15 }, // shrink inside
+    { x: -3, y: -5, width: 33, height: 22 }, // grow up/left only
+    { x: 0, y: 0, width: 31, height: 18 } // same origin, one more pixel each way
+  ];
+  for (const box of boxes) {
+    const next = recropped(annotations, cellType, box);
+    const nextType = next.cellTypes[0];
+    assert.deepEqual(nextType.cropRect, { x: 5 + box.x, y: 6 + box.y, width: box.width, height: box.height });
+    assert.deepEqual(next.cells.at(-1), annotations.cells.at(-1), "other types' cells untouched");
+    for (const [i, cell] of annotations.cells.entries()) {
+      if (cell.cellTypeId !== cellType.id) continue;
+      const moved = next.cells[i];
+      const tag = `${JSON.stringify(box)} ${JSON.stringify(orientOf(cell))}`;
+      assert.deepEqual(orientOf(moved), orientOf(cell), "orientation kept");
+      // A point of the new box is the old box's point shifted by the origin.
+      for (const p of [...SAMPLES, { x: box.width, y: box.height }]) {
+        const old = { x: p.x + box.x, y: p.y + box.y };
+        near(toDie(p, moved, nextType), toDie(old, cell, cellType), tag);
+      }
+      // Shapes stay on the silicon they were drawn on.
+      const poly = nextType.layers?.diffusion?.[0];
+      assert.ok(poly && poly.kind === "polygon");
+      const orig = cellType.layers!.diffusion![0] as LayerPolygon;
+      poly.points.forEach((q, k) =>
+        near(toDie(q, moved, nextType), toDie(orig.points[k], cell, cellType), `poly ${k} ${tag}`)
+      );
+      const line = nextType.layers?.polysilicon?.[0];
+      assert.ok(line?.kind === "line");
+      near(toDie({ x: line.x1, y: line.y1 }, moved, nextType), toDie({ x: 1, y: 1 }, cell, cellType), `line ${tag}`);
+      assert.equal(line.width, 2, "sizes untouched");
+    }
+  }
+  // Worked by hand for a 30×17 box recropped to 40×12 at (−4, 3): the new
+  // footprint's top-left is the old one's plus c − c′ + O·(d − c + c′), with
+  // c − c′ = (−5, 2.5) and d − c + c′ = (1, 0.5).
+  const box = boxes[0];
+  const at = (o: Partial<Cell>) => {
+    const c = recroppedMember({ id: "x", cellTypeId: "t1", x: 100, y: 50, ...o }, box, W, H);
+    return [c.x, c.y];
+  };
+  assert.deepEqual(at({}), [96, 53], "unoriented: just the origin shift");
+  assert.deepEqual(at({ flippedH: true }), [94, 53], "mirrored: the right edge grew on the left");
+  assert.deepEqual(at({ flippedV: true }), [96, 52]);
+  assert.deepEqual(at({ rotation: 90 }), [94.5, 53.5]);
+  assert.deepEqual(at({ rotation: 180 }), [94, 52]);
+  assert.deepEqual(at({ rotation: 270 }), [95.5, 51.5]);
+});
+
+test("a recrop keeps an unanchored template origin and an empty layer set", () => {
+  const bare: CellType = { id: "u", name: "u", cropRect: { x: 0, y: 0, width: 10, height: 8 } };
+  const next = recroppedCellType(bare, { x: 2, y: -1, width: 6, height: 9 });
+  assert.deepEqual(next.cropRect, { x: 0, y: 0, width: 6, height: 9 });
+  assert.equal(next.layers, undefined);
+});
+
+test("data built before a type-wide flip, turn or recrop is out of frame; member edits aren't", () => {
   const { annotations, cellType } = fixture();
   const members = (a: DieAnnotations) => a.cells.filter((c) => c.cellTypeId === cellType.id);
   const built = memberSignature(members(annotations));
@@ -201,6 +274,8 @@ test("data built before a type-wide flip or turn is out of frame; member edits a
   assert.equal(sameFrame(built, members(flipped)), false, "type flipped");
   const turned = applyTo(annotations, buildRotateCellTypeAction(annotations, cellType, 90));
   assert.equal(sameFrame(built, members(turned)), false, "type turned");
+  const recrop = recropped(annotations, cellType, { x: -2, y: 1, width: 34, height: 15 });
+  assert.equal(sameFrame(built, members(recrop)), false, "type recropped");
   // Moving, adding, or re-orienting one member keeps the frame.
   const [first, ...rest] = members(annotations);
   const edited = [{ ...first, x: first.x + 5, flippedH: !first.flippedH }, ...rest, { id: "new", cellTypeId: "t1", x: 0, y: 0 }];

@@ -161,6 +161,7 @@ function RE({ dieId }: { dieId: string }) {
   const setCanvasTab = useCellREStore((s) => s.setCanvasTab);
 
   const layerHidden = usePreferences((s) => s.reLayerHidden);
+  const showSurroundingDie = usePreferences((s) => s.reShowSurroundingDie);
   const useCleanSpecimens = usePreferences((s) => s.useCleanSpecimens);
   const specimenIndex = useCellSpecimens(dieId).data ?? null;
 
@@ -922,6 +923,7 @@ function RE({ dieId }: { dieId: string }) {
                       ? library.annotations.get(remoteCell.dieId)
                       : annotations
                 }
+                showSurroundingDie={showSurroundingDie}
                 extraction={extraction.data}
                 activeTool={activeTool}
                 activeLayer={activeLayer}

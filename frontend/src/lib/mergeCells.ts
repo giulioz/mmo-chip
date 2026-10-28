@@ -549,6 +549,55 @@ export function buildRotateCellTypeAction(
   return { kind: "batch", actions };
 }
 
+/** A new box for a type, drawn in its canonical frame: `x`/`y` are where the
+ *  new box's top-left sits in the old one (may be negative — it can grow),
+ *  `width`/`height` its size. */
+export interface RecropBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** The type half of a recrop: its box becomes `box`, and its layer shapes
+ *  shift with the canonical origin so they stay on the same features. The
+ *  template origin (`cropRect.x/y`) shifts along — except a (0, 0) one, which
+ *  means "take the first instance" and keeps meaning that. */
+export function recroppedCellType(cellType: CellType, box: RecropBox): CellType {
+  const { x: ox, y: oy } = cellType.cropRect;
+  const unanchored = ox === 0 && oy === 0;
+  const next: CellType = {
+    ...cellType,
+    cropRect: {
+      x: unanchored ? 0 : ox + box.x,
+      y: unanchored ? 0 : oy + box.y,
+      width: box.width,
+      height: box.height
+    }
+  };
+  if (cellType.layers) {
+    next.layers = mapLayerPoints(cellType.layers, (p) => ({ x: p.x - box.x, y: p.y - box.y }));
+  }
+  return next;
+}
+
+/**
+ * A member's half of its type's recrop: it keeps covering the same die
+ * pixels. A canonical point p of the new box is p + (box.x, box.y) of the old
+ * one, so with placement `die = xy + c + O(p − c)` (c the box centre),
+ * `xy' = xy + c − c' + O((box.x, box.y) − c + c')`. `w` × `h` is the type's
+ * box before the recrop and `box` the new one, both in this member's die
+ * pixels.
+ */
+export function recroppedMember(cell: Cell, box: RecropBox, w: number, h: number): Cell {
+  const cx = w / 2;
+  const cy = h / 2;
+  const nx = box.width / 2;
+  const ny = box.height / 2;
+  const v = orientVector(orientOf(cell), { x: box.x - cx + nx, y: box.y - cy + ny });
+  return { ...cell, x: cell.x + cx - nx + v.x, y: cell.y + cy - ny + v.y };
+}
+
 /** The type half of a mirror (`axis` "h" = left↔right as seen in the RE
  *  canvas, "v" = top↔bottom): layer shapes mirror across the box's centre
  *  line; the W×H box stays. */

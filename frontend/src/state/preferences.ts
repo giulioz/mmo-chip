@@ -111,6 +111,9 @@ interface PreferencesState {
    *  non-editable "groups" (inferred, die-viewer overlay) use the special
    *  keys `_inferred` / `_dieViewer`. */
   reLayerHidden: Record<string, boolean>;
+  /** Cells-RE: draw the die around the cell (its tiles past the crop),
+   *  dimmed, instead of the crop alone. */
+  reShowSurroundingDie: boolean;
 }
 
 interface PreferencesActions {
@@ -131,6 +134,7 @@ interface PreferencesActions {
   setMergeShowMlVias: (show: boolean) => void;
   setRoiClasses: (classes: AnnotationClass[]) => void;
   setReLayerHidden: (key: string, hidden: boolean) => void;
+  setReShowSurroundingDie: (show: boolean) => void;
   /**
    * "Solo" toggle for the Cells-RE layer visibility list. `key` is the layer
    * being soloed; `allKeys` is the full set of toggleable keys the panel
@@ -188,6 +192,7 @@ export const usePreferences = create<PreferencesState & PreferencesActions>()(
         mergeShowMlVias: false,
         savedViewports: {},
         reLayerHidden: {},
+        reShowSurroundingDie: false,
         mlResultsHidden: true,
         snapToVias: false,
         wireAutoEndOnVia: false,
@@ -240,6 +245,7 @@ export const usePreferences = create<PreferencesState & PreferencesActions>()(
             }
             return { reLayerHidden: { ...state.reLayerHidden, [key]: true } };
           }),
+        setReShowSurroundingDie: (show) => set({ reShowSurroundingDie: show }),
         soloReLayer: (key, allKeys) =>
           set((state) => {
             const isOtherHidden = (k: string) => state.reLayerHidden[k] === true;
@@ -334,6 +340,7 @@ export const usePreferences = create<PreferencesState & PreferencesActions>()(
           mergeShowMlVias: state.mergeShowMlVias,
           savedViewports: state.savedViewports,
           reLayerHidden: state.reLayerHidden,
+          reShowSurroundingDie: state.reShowSurroundingDie,
           mlResultsHidden: state.mlResultsHidden,
           snapToVias: state.snapToVias,
           wireAutoEndOnVia: state.wireAutoEndOnVia,

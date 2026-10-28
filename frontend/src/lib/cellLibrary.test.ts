@@ -19,6 +19,7 @@ import {
   libraryDieIds,
   libraryMemberCount,
   placeableTypes,
+  recropInOwnerPixels,
   remoteInstances,
   routeLibraryAction,
   withLibraryTypes
@@ -212,6 +213,47 @@ test("turning a shared type turns it on its owner and every instance, each in it
     "batch"
   );
   assert.equal(buildLibraryTypeTransform(view, annB, "missing", { kind: "flip", axis: "h" }), null);
+});
+
+test("recropping a shared type re-places every instance on every die, each in its own pixels", () => {
+  // Drawn on B (1.5× A's pixels): 6 px left and 3 px up of B's 60×30 box,
+  // 75×36 big — 4, 2, 50×24 in A's pixels.
+  const box = recropInOwnerPixels(view, annB, "nand", { x: -6, y: -3, width: 75, height: 36 });
+  assert.deepEqual(box, { x: -4, y: -2, width: 50, height: 24 });
+  assert.equal(recropInOwnerPixels(view, annB, "nand", { x: 0, y: 0, width: 0.2, height: 5 }), null);
+  const action = buildLibraryTypeTransform(view, annB, "nand", { kind: "recrop", box: box! });
+  assert.ok(action?.kind === "batch");
+  const [typeEdit, ...rest] = action.actions;
+  assert.ok(typeEdit.kind === "onDie" && typeEdit.dieId === "A" && typeEdit.action.kind === "upsertCellType");
+  const nextType = typeEdit.action.cellType;
+  assert.deepEqual(nextType.cropRect, { x: 96, y: 198, width: 50, height: 24 });
+  assert.deepEqual(nextType.layers?.contact?.[0], { id: "c", kind: "point", x: 24, y: 12, size: 2 });
+  // Every instance still covers the same die pixels: an old-box point and
+  // the same point of the new box land on the same die spot.
+  const onDie = (p: { x: number; y: number }, cell: Cell, t: CellType) => {
+    const o = applyOrientation(p, cell, t.cropRect.width, t.cropRect.height);
+    return { x: cell.x + o.x, y: cell.y + o.y };
+  };
+  const check = (before: Cell, after: Cell, k: number) => {
+    const oldT = scaleCellType(nand, k);
+    const newT = scaleCellType(nextType, k);
+    for (const p of [{ x: 0, y: 0 }, { x: 50, y: 24 }, { x: 7, y: 19 }]) {
+      const a = onDie({ x: p.x * k, y: p.y * k }, after, newT);
+      const b = onDie({ x: (p.x + box!.x) * k, y: (p.y + box!.y) * k }, before, oldT);
+      assert.ok(Math.abs(a.x - b.x) < 1e-9 && Math.abs(a.y - b.y) < 1e-9, `${before.id}: ${JSON.stringify([a, b])}`);
+    }
+  };
+  const home = rest.find((a) => a.kind === "upsertCell");
+  assert.ok(home?.kind === "upsertCell");
+  assert.deepEqual([home.cell.x, home.cell.y], [294, 297]);
+  check(annB.cells[0], home.cell, 1.5);
+  const onA = rest.find((a) => a.kind === "onDie" && a.dieId === "A");
+  assert.ok(onA?.kind === "onDie" && onA.action.kind === "batch");
+  const [a1, a2] = onA.action.actions.map((a) => (a.kind === "upsertCell" ? a.cell : null));
+  // a2 is mirrored: the 6 px the box grew on its canonical right are on its die left.
+  assert.deepEqual([a1?.x, a1?.y, a2?.x, a2?.y], [6, 8, 54, 8]);
+  check(annA.cells[0], a1!, 1);
+  check(annA.cells[1], a2!, 1);
 });
 
 test("a placement draft scales uniformly from a corner and commits as a cell of the owner's type", () => {

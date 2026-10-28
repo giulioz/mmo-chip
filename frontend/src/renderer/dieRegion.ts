@@ -42,6 +42,9 @@ interface TileEntry {
 
 const tiles = new Map<string, TileEntry>();
 const regions = new Map<string, DieRegion>();
+/** Viewport-sized regions (`dieView`): one per named slot, recomposed in
+ *  place, so panning doesn't fill the region cache with screen-sized canvases. */
+const slots = new Map<string, { key: string; region: DieRegion }>();
 let useCounter = 0;
 
 /** Coarsest level whose pixels are no bigger than a display pixel, given
@@ -64,7 +67,8 @@ export function dieRegion(
   die: DieMetadata,
   want: Rect,
   pxPerDiePx: number,
-  onLoad: () => void
+  onLoad: () => void,
+  slot?: string
 ): DieRegion | null {
   const z = levelForScale(die, pxPerDiePx);
   const level = die.levels[z];
@@ -80,14 +84,17 @@ export function dieRegion(
   const h = ly1 - ly0;
 
   const key = `${die.id}|${z}|${lx0},${ly0},${w}x${h}`;
-  const cached = regions.get(key);
+  const inSlot = slot !== undefined ? slots.get(slot) : undefined;
+  const cached = slot !== undefined ? (inSlot?.key === key ? inSlot.region : undefined) : regions.get(key);
   if (cached?.complete) {
-    regions.delete(key); // refresh LRU position
-    regions.set(key, cached);
+    if (slot === undefined) {
+      regions.delete(key); // refresh LRU position
+      regions.set(key, cached);
+    }
     return cached;
   }
 
-  const canvas = cached?.canvas ?? document.createElement("canvas");
+  const canvas = cached?.canvas ?? inSlot?.region.canvas ?? document.createElement("canvas");
   canvas.width = w;
   canvas.height = h;
   const ctx = canvas.getContext("2d");
@@ -130,10 +137,37 @@ export function dieRegion(
     rect: { x: lx0 * s, y: ly0 * s, width: w * s, height: h * s },
     complete
   };
+  if (slot !== undefined) {
+    slots.set(slot, { key, region });
+    return region;
+  }
   regions.delete(key);
   regions.set(key, region);
   evict();
   return region;
+}
+
+/**
+ * Die pixels for a view (whatever a canvas shows around a cell), snapped out
+ * to whole tiles of the level so a pan only recomposes when it crosses a tile
+ * edge. Kept in `slot` — one region per slot, reused — rather than the
+ * region cache: views are screen-sized and change on every pan.
+ */
+export function dieView(
+  die: DieMetadata,
+  want: Rect,
+  pxPerDiePx: number,
+  onLoad: () => void,
+  slot: string
+): DieRegion | null {
+  const level = die.levels[levelForScale(die, pxPerDiePx)];
+  if (!level) return null;
+  const span = die.tileSize * level.scale;
+  const x0 = Math.floor(want.x / span) * span;
+  const y0 = Math.floor(want.y / span) * span;
+  const x1 = Math.ceil((want.x + want.width) / span) * span;
+  const y1 = Math.ceil((want.y + want.height) / span) * span;
+  return dieRegion(die, { x: x0, y: y0, width: x1 - x0, height: y1 - y0 }, pxPerDiePx, onLoad, slot);
 }
 
 function requestTile(url: string, onLoad: () => void): TileEntry {

@@ -18,9 +18,11 @@ import { cellScaleOf } from "shared/cellLibrary";
 import { useAnnotations } from "../api/annotations";
 import { useAnnotationsWebSocket } from "../api/annotationsWebSocket";
 import { useActionDispatcher } from "../api/actions";
-import { useCellLibrary, useForeignTypeImageUrl } from "../api/cellLibrary";
+import { useCellLibrary, useForeignTypeImageUrl, withEveryDie } from "../api/cellLibrary";
 import {
+  buildLibraryTypeTransform,
   buildTypeMergeAction,
+  recropInOwnerPixels,
   routeLibraryAction,
   withLibraryTypes,
   type TypeAlignment,
@@ -45,10 +47,12 @@ import { useMergeStore } from "../state/mergeCells";
 import { usePreferences } from "../state/preferences";
 import { fitRectViewport } from "../renderer/TiledCanvas";
 import { isTypingTarget } from "../lib/keyboard";
+import type { Rect } from "../lib/geometry";
 import {
   MergeCanvas,
   type CellView,
-  type MergeCanvasHandle
+  type MergeCanvasHandle,
+  type RecropView
 } from "../components/mergeCells/MergeCanvas";
 import { MergeLeftPanel } from "../components/mergeCells/MergeLeftPanel";
 import { Filmstrip } from "../components/mergeCells/Filmstrip";
@@ -704,6 +708,56 @@ function Merge({ dieId }: { dieId: string }) {
       }
     : null;
 
+  // ── Recrop: draw a new box for a type around one of its instances ────
+  // The instance shown alone: the candidate in candidate-only mode (a placed
+  // cell, not a proposal or a whole type), else the specimen's reference.
+  const [recropOn, setRecropOn] = useState(false);
+  const recropTarget =
+    mode === "candidate"
+      ? candidateCell && candidateType && !candidateProposal
+        ? { cell: candidateCell, cellType: candidateType }
+        : null
+      : specimenCell && specimenType
+        ? { cell: specimenCell, cellType: specimenType }
+        : null;
+  // A tried-out die scale would size a library type's new box at a scale
+  // that isn't the die's: set or reset it first.
+  const canRecrop = !!recropTarget && !scalePending;
+  const recropBusyRef = useRef(false);
+  const doRecrop = useCallback(
+    async (box: Rect) => {
+      if (!ownAnnotations || !recropTarget || recropBusyRef.current) return;
+      const typeId = recropTarget.cellType.id;
+      const ownerBox = recropInOwnerPixels(library, ownAnnotations, typeId, box);
+      if (!ownerBox) return;
+      recropBusyRef.current = true;
+      try {
+        // Every instance, on every die (one undo step), keeps its pixels.
+        const everywhere = await withEveryDie(qc, library);
+        const action = buildLibraryTypeTransform(everywhere, ownAnnotations, typeId, {
+          kind: "recrop",
+          box: ownerBox
+        });
+        if (action) {
+          setRecropOn(false);
+          await dispatcher.dispatch(action);
+        }
+      } catch (e) {
+        console.warn("[merge] recrop failed", e);
+      } finally {
+        recropBusyRef.current = false;
+      }
+    },
+    [ownAnnotations, recropTarget, library, qc, dispatcher]
+  );
+  const recropView: RecropView | null =
+    recropOn && canRecrop && recropTarget
+      ? {
+          view: { cell: recropTarget.cell, cellType: recropTarget.cellType, imageUrl: null },
+          onCommit: (box) => void doRecrop(box)
+        }
+      : null;
+
   /** Merge the candidate type with the specimen's (see buildTypeMergeAction):
    *  one undo step. When the candidate is the one kept, it becomes the
    *  specimen — the old one is gone. */
@@ -862,7 +916,7 @@ function Merge({ dieId }: { dieId: string }) {
   //   ←/↑ prev · →/↓ next candidate
   //   1 overlay · 2 side-by-side · 3 difference
   //   f flip H · g flip V · h rotate · j auto-align (stub)
-  //   y accept & merge
+  //   y accept & merge · r recrop (Esc leaves it)
   useEffect(() => {
     const stepCandidate = (delta: number) => {
       if (candidates.length === 0) return;
@@ -921,6 +975,13 @@ function Merge({ dieId }: { dieId: string }) {
         case "Y":
           doMerge();
           break;
+        case "r":
+        case "R":
+          if (canRecrop) setRecropOn((on) => !on);
+          break;
+        case "Escape":
+          setRecropOn(false);
+          break;
         case "n":
         case "N":
           if (candidateProposal) doDismiss(candidateProposal);
@@ -952,7 +1013,8 @@ function Merge({ dieId }: { dieId: string }) {
     canAutoAlign,
     doAutoAlign,
     scaleOther,
-    stepScale
+    stepScale,
+    canRecrop
   ]);
 
   const typeName = (id: string) => {
@@ -1068,6 +1130,25 @@ function Merge({ dieId }: { dieId: string }) {
           </>
         )}
         <ToolDivider />
+        <span
+          className={"chip" + (recropView ? " on" : "")}
+          style={{ cursor: canRecrop ? "pointer" : "default", opacity: canRecrop ? 1 : 0.5 }}
+          onClick={() => canRecrop && setRecropOn((on) => !on)}
+          title={
+            scalePending
+              ? "Set or reset the die scale before recropping"
+              : recropTarget
+                ? `Recrop ${recropTarget.cellType.name}: drag a new box around the ${
+                    mode === "candidate" ? "candidate" : "specimen"
+                  } — every instance keeps its place (R, Esc to leave)`
+                : mode === "candidate"
+                  ? "Recrop needs a placed candidate cell"
+                  : "Recrop needs an instance of the specimen type on this die"
+          }
+        >
+          <Kb>R</Kb> recrop
+        </span>
+        <ToolDivider />
         <label className="check">
           <input
             type="checkbox"
@@ -1141,6 +1222,7 @@ function Merge({ dieId }: { dieId: string }) {
             onAlign={onAlign}
             onAlignCanonical={onAlignCanonical}
             onScaleCandidate={onScaleCandidate}
+            recrop={recropView}
           />
           <Filmstrip
             die={die ?? null}
@@ -1170,6 +1252,9 @@ function Merge({ dieId }: { dieId: string }) {
       <StatusBar
         items={[
           die?.name ?? dieId,
+          recropView
+            ? `recrop ${recropTarget?.cellType.name ?? ""} · drag a new box · Esc to leave`
+            : null,
           mode === "overlay"
             ? `overlay · ${Math.round(opacity * 100)}%`
             : mode === "diff"

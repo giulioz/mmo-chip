@@ -368,6 +368,7 @@ export function CellRELeftPanel({
                 predictions need the cached prediction API plumbing first. */}
             <DvLayerRow label="Wires" swatch={NET_COLOR} prefKey="_dvWires" />
             <DvLayerRow label="Vias" swatch={COLOR_VIA} prefKey="_dvVias" />
+            <SurroundingDieRow />
             <DisabledLayerRow label="ML results" />
           </>
         )}
@@ -424,6 +425,22 @@ function DvLayerRow({
         visible: !hidden,
         onToggle: () => setHidden(prefKey, !hidden)
       }}
+    />
+  );
+}
+
+/** Show the die around the cell (its tiles past the crop). Off by default
+ *  and not part of the layer solo set: it's context, not a layer. */
+function SurroundingDieRow() {
+  const show = usePreferences((s) => s.reShowSurroundingDie);
+  const setShow = usePreferences((s) => s.setReShowSurroundingDie);
+  return (
+    <TreeRow
+      depth={0}
+      icon={Ic.image}
+      label="Surrounding die"
+      onSelect={() => setShow(!show)}
+      visibility={{ visible: show, onToggle: () => setShow(!show) }}
     />
   );
 }

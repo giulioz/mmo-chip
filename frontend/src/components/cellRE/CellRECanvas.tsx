@@ -59,9 +59,9 @@ import {
   WIRE_LAYER_COLOR
 } from "../../renderer/annotations/style";
 import { enterCellDieFrame } from "../../renderer/annotations/cellFrame";
-import { dieRegion } from "../../renderer/dieRegion";
+import { dieRegion, dieView } from "../../renderer/dieRegion";
 import type { TileBounds } from "../../renderer/types";
-import { cellFootprint } from "../../lib/cellDetection";
+import { canonicalRectOnDie, cellFootprint } from "../../lib/cellDetection";
 import {
   shapeKey,
   parseShapeKey,
@@ -98,6 +98,10 @@ interface Props {
   /** Full die annotations — used to draw the die-viewer overlay (wires +
    *  vias clipped to the cell's die rect). Absent ⇒ no overlay. */
   annotations?: DieAnnotations;
+  /** Also draw the die around the instance (its tiles past the crop),
+   *  dimmed, through the same orientation — and the die overlay with it.
+   *  Needs `cell` and `die`. */
+  showSurroundingDie?: boolean;
   activeTool: ReToolKind;
   activeLayer: LayerType;
   /** Visibility map. Editable cell-layer keys plus the virtual keys for the
@@ -218,6 +222,7 @@ export const CellRECanvas = forwardRef<CellRECanvasHandle, Props>(function CellR
     imageUrl,
     imageCanonical = false,
     annotations,
+    showSurroundingDie = false,
     extraction,
     activeTool,
     activeLayer,
@@ -1164,9 +1169,38 @@ export const CellRECanvas = forwardRef<CellRECanvasHandle, Props>(function CellR
       cell && die && !imageCanonical
         ? dieRegion(die, cellFootprint(cell, instanceBox), v.zoom * dpr * k, redraw)
         : null;
+    // The die around it: whatever the viewport shows, in the instance's die
+    // pixels, dimmed outside the box so the cell still reads as the subject.
+    const visible = { x: v.ox, y: v.oy, width: cw / v.zoom, height: ch / v.zoom };
+    const surroundRect =
+      showSurroundingDie && cell
+        ? canonicalRectOnDie(cell, instanceBox.cropRect.width, instanceBox.cropRect.height, {
+            x: visible.x / k,
+            y: visible.y / k,
+            width: visible.width / k,
+            height: visible.height / k
+          })
+        : null;
+    const surround =
+      surroundRect && cell && die ? dieView(die, surroundRect, v.zoom * dpr * k, redraw, "cell-re-surround") : null;
     ctx.save();
     if (hovering) ctx.globalAlpha = DIM_ALPHA;
     ctx.imageSmoothingEnabled = v.zoom < 3;
+    if (surround && cell) {
+      ctx.save();
+      if (k !== 1) ctx.scale(k, k);
+      enterCellDieFrame(ctx, cell, box.w / k, box.h / k);
+      const r = surround.rect;
+      ctx.drawImage(surround.canvas, r.x, r.y, r.width, r.height);
+      ctx.restore();
+      ctx.save();
+      ctx.fillStyle = "rgba(0,0,0,0.4)";
+      ctx.beginPath();
+      ctx.rect(visible.x, visible.y, visible.width, visible.height);
+      ctx.rect(0, 0, box.w, box.h);
+      ctx.fill("evenodd");
+      ctx.restore();
+    }
     if (region && cell) {
       ctx.save();
       ctx.beginPath();
@@ -1189,7 +1223,7 @@ export const CellRECanvas = forwardRef<CellRECanvasHandle, Props>(function CellR
       ctx.save();
       if (k !== 1) ctx.scale(k, k);
       enterCellDieFrame(ctx, cell, box.w / k, box.h / k);
-      drawDieOverlay(ctx, annotations, cellFootprint(cell, instanceBox), v.zoom * k, {
+      drawDieOverlay(ctx, annotations, surroundRect ?? cellFootprint(cell, instanceBox), v.zoom * k, {
         hideWires: layerHidden["_dvWires"] === true,
         hideVias: layerHidden["_dvVias"] === true
       });

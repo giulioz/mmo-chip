@@ -14,9 +14,12 @@ import {
   invertOrient,
   orientOf,
   orientVector,
+  recroppedCellType,
+  recroppedMember,
   rotatedCellType,
   rotatedMember,
-  type Orient
+  type Orient,
+  type RecropBox
 } from "./mergeCells";
 
 /**
@@ -404,14 +407,20 @@ export function remoteInstances(
   return out.sort((a, b) => a.dieName.localeCompare(b.dieName, undefined, { numeric: true }));
 }
 
-export type TypeTransform = { kind: "rotate"; deg: 90 | -90 } | { kind: "flip"; axis: "h" | "v" };
+/** A type-wide edit that keeps every instance on its die pixels. A recrop's
+ *  `box` is in the owner die's pixels (see `recropInOwnerPixels`). */
+export type TypeTransform =
+  | { kind: "rotate"; deg: 90 | -90 }
+  | { kind: "flip"; axis: "h" | "v" }
+  | { kind: "recrop"; box: RecropBox };
 
 /**
- * Turn or mirror a type everywhere it's used: its definition, in the die
- * that owns it, and every instance on every loaded die of the library — each
- * re-placed in its own die's pixels so it keeps covering the same die area
- * (see `buildRotateCellTypeAction`). One undo step; null when the type has
- * no instance anywhere. `homeAnn` is this die's own (unmerged) annotations.
+ * Turn, mirror or recrop a type everywhere it's used: its definition, in the
+ * die that owns it, and every instance on every loaded die of the library —
+ * each re-placed in its own die's pixels so it keeps covering the same die
+ * area (see `buildRotateCellTypeAction`, `recroppedMember`). One undo step;
+ * null when the type has no instance anywhere. `homeAnn` is this die's own
+ * (unmerged) annotations.
  */
 export function buildLibraryTypeTransform(
   view: CellLibraryView,
@@ -424,7 +433,11 @@ export function buildLibraryTypeTransform(
   const onDie = (dieId: string, a: AnnotationAction): AnnotationAction =>
     dieId === view.dieId ? a : { kind: "onDie", dieId, action: a };
   const nextType =
-    t.kind === "rotate" ? rotatedCellType(owner.type, t.deg) : flippedCellType(owner.type, t.axis);
+    t.kind === "rotate"
+      ? rotatedCellType(owner.type, t.deg)
+      : t.kind === "flip"
+        ? flippedCellType(owner.type, t.axis)
+        : recroppedCellType(owner.type, t.box);
   const actions: AnnotationAction[] = [
     onDie(owner.ownerId, { kind: "upsertCellType", cellType: nextType, prevCellType: owner.type })
   ];
@@ -437,7 +450,12 @@ export function buildLibraryTypeTransform(
     const cells: AnnotationAction[] = [];
     for (const c of ann.cells) {
       if (!placesType(c, dieId, typeId, owner.ownerId)) continue;
-      const next = t.kind === "rotate" ? rotatedMember(c, t.deg, w, h) : flippedMember(c, t.axis);
+      const next =
+        t.kind === "rotate"
+          ? rotatedMember(c, t.deg, w, h)
+          : t.kind === "flip"
+            ? flippedMember(c, t.axis)
+            : recroppedMember(c, scaleRect(t.box, r), w, h);
       cells.push({ kind: "upsertCell", cell: next, prevCell: c });
     }
     members += cells.length;
@@ -446,6 +464,26 @@ export function buildLibraryTypeTransform(
     }
   }
   return members === 0 ? null : { kind: "batch", actions };
+}
+
+/** A recrop box drawn in this die's pixels (the type's canonical frame as
+ *  this die sees it), in the owner die's pixels, snapped to whole owner
+ *  pixels. Null when the type is unknown or the box is empty. */
+export function recropInOwnerPixels(
+  view: CellLibraryView,
+  homeAnn: DieAnnotations,
+  typeId: string,
+  box: RecropBox
+): RecropBox | null {
+  const owner = ownerOf(view, homeAnn, typeId);
+  if (!owner) return null;
+  const k = 1 / libraryRatio(view.dies.get(view.dieId), view.dies.get(owner.ownerId));
+  const x0 = Math.round(box.x * k);
+  const y0 = Math.round(box.y * k);
+  const x1 = Math.round((box.x + box.width) * k);
+  const y1 = Math.round((box.y + box.height) * k);
+  if (x1 <= x0 || y1 <= y0) return null;
+  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
 }
 
 // ── Merging two whole types ──────────────────────────────────────────

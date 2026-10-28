@@ -73,13 +73,25 @@ export function cellFootprint(
 ): Rect {
   const w = cellType.cropRect.width;
   const h = cellType.cropRect.height;
+  return canonicalRectOnDie(cell, w, h, { x: 0, y: 0, width: w, height: h });
+}
+
+/** Axis-aligned die rect covering `r`, a rect in a placed cell's canonical
+ *  frame (its `w` × `h` box at the origin; `r` may reach past it — the die
+ *  around the cell). */
+export function canonicalRectOnDie(
+  cell: Pick<Cell, "x" | "y" | "flippedH" | "flippedV" | "rotation">,
+  w: number,
+  h: number,
+  r: Rect
+): Rect {
   const corners = [
-    { x: 0, y: 0 },
-    { x: w, y: 0 },
-    { x: w, y: h },
-    { x: 0, y: h }
+    { x: r.x, y: r.y },
+    { x: r.x + r.width, y: r.y },
+    { x: r.x + r.width, y: r.y + r.height },
+    { x: r.x, y: r.y + r.height }
   ].map((p) => applyOrientation(p, cell, w, h));
-  const b = polygonBounds(corners) ?? { x: 0, y: 0, width: w, height: h };
+  const b = polygonBounds(corners) ?? r;
   return { x: cell.x + b.x, y: cell.y + b.y, width: b.width, height: b.height };
 }
 
@@ -184,25 +196,26 @@ function orientCode(m: Pick<Cell, "flippedH" | "flippedV" | "rotation">): string
 /**
  * Whether data built from a type's members (a clean specimen, a detection
  * template — `signature` is `memberSignature` at build time) is still in the
- * type's current frame. Turning or flipping the whole type re-orients every
- * member at once, so none of the members it was built from kept its
- * orientation; re-aligning, adding or fixing single members doesn't count.
+ * type's current frame. Turning, flipping or recropping the whole type
+ * re-places every member at once, so none of the members it was built from
+ * kept both its orientation and its position; re-aligning, adding or fixing
+ * single members doesn't count.
  */
 export function sameFrame(
   signature: string | undefined,
-  members: ReadonlyArray<Pick<Cell, "id" | "flippedH" | "flippedV" | "rotation">>
+  members: ReadonlyArray<Pick<Cell, "id" | "x" | "y" | "flippedH" | "flippedV" | "rotation">>
 ): boolean {
   if (!signature) return true;
   const then = new Map<string, string>();
   for (const entry of signature.split("|")) {
     const parts = entry.split(":");
-    if (parts.length >= 4) then.set(parts[0], parts[parts.length - 1]);
+    if (parts.length >= 4) then.set(parts[0], parts.slice(-3).join(":"));
   }
   let shared = 0;
   for (const m of members) {
     const was = then.get(m.id);
     if (was === undefined) continue;
-    if (was === orientCode(m)) return true;
+    if (was === `${Math.round(m.x)}:${Math.round(m.y)}:${orientCode(m)}`) return true;
     shared += 1;
   }
   return shared === 0;

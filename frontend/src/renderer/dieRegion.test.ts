@@ -51,7 +51,7 @@ g.document = {
     };
   }
 };
-const { dieRegion, levelForScale } = await import("./dieRegion");
+const { dieRegion, dieView, levelForScale } = await import("./dieRegion");
 
 // 3000×2000 die in 512 px tiles: levels z0 (÷8) … z3 (full resolution).
 function makeDie(): DieMetadata {
@@ -145,4 +145,20 @@ test("cached coarser tiles stand in, upscaled, while the target loads", () => {
 
 test("a region off the die has nothing to draw", () => {
   assert.equal(dieRegion(die, { x: 4000, y: 0, width: 10, height: 10 }, 1, () => {}), null);
+});
+
+test("a view snaps out to whole tiles and reuses its slot's canvas", () => {
+  // Level 2 (÷2): tiles span 1024 die px. A pan inside one tile keeps the
+  // same region; crossing an edge recomposes into the same canvas.
+  const a = dieView(die, { x: 1100, y: 100, width: 300, height: 200 }, 0.5, () => {}, "view");
+  assert.ok(a);
+  assert.deepEqual(a.rect, { x: 1024, y: 0, width: 1024, height: 1024 });
+  load(2, 1, 0);
+  const b = dieView(die, { x: 1150, y: 120, width: 300, height: 200 }, 0.5, () => {}, "view");
+  assert.ok(b?.complete);
+  assert.deepEqual(b.rect, a.rect);
+  const c = dieView(die, { x: 900, y: 120, width: 300, height: 200 }, 0.5, () => {}, "view");
+  assert.ok(c);
+  assert.deepEqual(c.rect, { x: 0, y: 0, width: 2048, height: 1024 });
+  assert.equal(c.canvas, a.canvas, "one canvas per slot");
 });

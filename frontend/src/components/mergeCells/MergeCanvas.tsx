@@ -12,10 +12,10 @@ import type { Cell, CellType, DieMetadata, MLPrediction } from "shared";
 import { drawCellLayers } from "../../renderer/annotations/shapes";
 import { COLOR_VIA, COLOR_VIA_FILL } from "../../renderer/annotations/style";
 import { enterCellDieFrame } from "../../renderer/annotations/cellFrame";
-import { dieRegion } from "../../renderer/dieRegion";
+import { dieRegion, dieView } from "../../renderer/dieRegion";
 import type { TileBounds } from "../../renderer/types";
-import { cellFootprint } from "../../lib/cellDetection";
-import { applyOrientation } from "../../lib/geometry";
+import { canonicalRectOnDie, cellFootprint } from "../../lib/cellDetection";
+import { applyOrientation, rectFromPoints, type Point, type Rect } from "../../lib/geometry";
 import { orientOf, type Orient } from "../../lib/mergeCells";
 
 /** A whole cell type shown lined up in another type's box (merging two
@@ -52,6 +52,15 @@ export interface CellView {
   align?: TypeAlignView;
 }
 
+/** The recrop tool: `view`'s instance shown alone with the die around it; a
+ *  drag draws its type's new box. */
+export interface RecropView {
+  view: CellView;
+  /** The drawn box, in the instance's canonical frame (its current box at
+   *  the origin), snapped to whole pixels. */
+  onCommit: (box: Rect) => void;
+}
+
 export interface MergeCanvasHandle {
   /** Re-fit both crops to the viewport. */
   fit: () => void;
@@ -86,6 +95,8 @@ interface Props {
   /** Commit a corner drag of a scalable type candidate: the factor its size
    *  should change by (about its centre). */
   onScaleCandidate?: (factor: number) => void;
+  /** Set while the recrop tool is on: replaces the comparison view. */
+  recrop?: RecropView | null;
 }
 
 const GAP = 24; // world-unit gap between the two boxes in side-by-side
@@ -125,6 +136,19 @@ function boxOf(v: CellView | null): { w: number; h: number } | null {
   return { w: width, h: height };
 }
 
+/** The box a recrop drag from `a` to `b` draws, on whole pixels. */
+function recropBox(a: Point, b: Point): Rect {
+  const r = rectFromPoints(a, b);
+  const x0 = Math.round(r.x);
+  const y0 = Math.round(r.y);
+  return {
+    x: x0,
+    y: y0,
+    width: Math.round(r.x + r.width) - x0,
+    height: Math.round(r.y + r.height) - y0
+  };
+}
+
 /** Combined content extent (world units) for the current mode. */
 function contentExtent(
   mode: MergeMode,
@@ -158,7 +182,8 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
     die,
     onAlign,
     onAlignCanonical,
-    onScaleCandidate
+    onScaleCandidate,
+    recrop = null
   },
   ref
 ) {
@@ -170,7 +195,7 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
   const viewRef = useRef<View>({ ox: 0, oy: 0, zoom: 1 });
   const sizeRef = useRef({ w: 1, h: 1 });
   const dragRef = useRef<{
-    kind: "pan" | "align" | "scale";
+    kind: "pan" | "align" | "scale" | "recrop";
     sx: number;
     sy: number;
     startOx: number;
@@ -182,6 +207,10 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
     centre?: { x: number; y: number };
     corner?: { x: number; y: number };
     factor?: number;
+    /** Recrop drags: where the box was started and where it reaches (world
+     *  units — the target's canonical frame). */
+    from?: Point;
+    to?: Point;
   } | null>(null);
   const [overHandle, setOverHandle] = useState<null | "nwse" | "nesw">(null);
   const spaceRef = useRef(false);
@@ -199,7 +228,8 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
     candidate,
     onAlign,
     onAlignCanonical,
-    onScaleCandidate
+    onScaleCandidate,
+    recrop
   });
   propsRef.current = {
     mode,
@@ -210,7 +240,8 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
     candidate,
     onAlign,
     onAlignCanonical,
-    onScaleCandidate
+    onScaleCandidate,
+    recrop
   };
 
   /** A scalable type candidate's box on screen (canvas css px) in the single-
@@ -221,7 +252,7 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
   } | null => {
     const p = propsRef.current;
     const a = p.candidate?.align;
-    if (!a?.scalable || p.mode === "sxs" || p.mode === "specimen") return null;
+    if (!a?.scalable || p.recrop || p.mode === "sxs" || p.mode === "specimen") return null;
     const sp = boxOf(p.specimen);
     const cd = boxOf(p.candidate);
     if (!cd) return null;
@@ -299,6 +330,18 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
     const sp = boxOf(p.specimen);
     const cd = boxOf(p.candidate);
     const { w: cw, h: ch } = sizeRef.current;
+    const rb = p.recrop ? boxOf(p.recrop.view) : null;
+    if (rb) {
+      // The cell with room around it to draw a bigger box.
+      const view = fitBox({ w: rb.w * 1.8, h: rb.h * 1.8 }, cw, ch);
+      viewRef.current = {
+        zoom: view.zoom,
+        ox: rb.w / 2 - cw / 2 / view.zoom,
+        oy: rb.h / 2 - ch / 2 / view.zoom
+      };
+      redraw();
+      return;
+    }
     if (p.mode === "sxs") {
       // Linked: one shared view sized so the larger of the two cells fits a
       // half-pane; both panes then render at the same scale/region.
@@ -347,9 +390,11 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
     const b = boxOf(v);
     return b ? `${b.w}x${b.h}` : "-";
   };
-  const fitKey = `${mode}|${specimen?.cell?.id ?? specimen?.cellType?.id ?? "-"}|${
-    candidate?.cell?.id ?? "-"
-  }|${sizeKey(specimen)}|${sizeKey(candidate)}`;
+  const fitKey = recrop
+    ? `recrop|${recrop.view.cell?.id ?? "-"}|${sizeKey(recrop.view)}`
+    : `${mode}|${specimen?.cell?.id ?? specimen?.cellType?.id ?? "-"}|${
+        candidate?.cell?.id ?? "-"
+      }|${sizeKey(specimen)}|${sizeKey(candidate)}`;
   const fitKeyRef = useRef("");
   useEffect(() => {
     if (fitKey !== fitKeyRef.current) {
@@ -568,7 +613,58 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
       ctx.restore();
     };
 
-    if (mode === "sxs") {
+    /** The recrop tool: the instance in its canonical frame with the die
+     *  around it (dimmed), its box, and the box being drawn. */
+    const drawRecrop = (rv: CellView) => {
+      const box = boxOf(rv);
+      const cell = rv.cell;
+      if (!box || !cell) return;
+      const v = viewRef.current;
+      setWorld(v, 0);
+      const visible = { x: v.ox, y: v.oy, width: cw / v.zoom, height: ch / v.zoom };
+      const region = die
+        ? dieView(die, canonicalRectOnDie(cell, box.w, box.h, visible), v.zoom * dpr, redraw, "merge-recrop")
+        : null;
+      ctx.imageSmoothingEnabled = v.zoom < 3;
+      if (region) {
+        ctx.save();
+        enterCellDieFrame(ctx, cell, box.w, box.h);
+        const r = region.rect;
+        ctx.drawImage(region.canvas, r.x, r.y, r.width, r.height);
+        ctx.restore();
+      }
+      ctx.fillStyle = "rgba(0,0,0,0.45)";
+      ctx.beginPath();
+      ctx.rect(visible.x, visible.y, visible.width, visible.height);
+      ctx.rect(0, 0, box.w, box.h);
+      ctx.fill("evenodd");
+      if (showAnno) drawCellLayers(ctx, rv.cellType?.layers, mkBounds(v.zoom), { outline: false });
+      ctx.strokeStyle = "rgba(245,214,138,0.7)";
+      ctx.lineWidth = 1 / v.zoom;
+      ctx.strokeRect(0, 0, box.w, box.h);
+      const d = dragRef.current;
+      if (d?.kind === "recrop" && d.from && d.to) {
+        const r = recropBox(d.from, d.to);
+        ctx.strokeStyle = "rgba(127,178,255,0.95)";
+        ctx.lineWidth = 1.5 / v.zoom;
+        ctx.setLineDash([5 / v.zoom, 3 / v.zoom]);
+        ctx.strokeRect(r.x, r.y, r.width, r.height);
+        ctx.setLineDash([]);
+        // Its size, just above it.
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.font = "11px ui-monospace, monospace";
+        ctx.fillStyle = "rgba(127,178,255,0.95)";
+        ctx.fillText(
+          `${r.width}×${r.height}`,
+          (r.x - v.ox) * v.zoom,
+          (r.y - v.oy) * v.zoom - 5
+        );
+      }
+    };
+
+    if (recrop) {
+      drawRecrop(recrop.view);
+    } else if (mode === "sxs") {
       // Two independent panes: specimen left, candidate right. Each clipped
       // to its half, each with its own pan/zoom view.
       const half = cw / 2;
@@ -678,6 +774,25 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
     canvas.setPointerCapture(e.pointerId);
     const v = viewRef.current;
     const panMode = spaceRef.current || e.button === 1 || e.button === 2;
+    if (propsRef.current.recrop && !panMode) {
+      const rect = canvas.getBoundingClientRect();
+      const at = {
+        x: v.ox + (e.clientX - rect.left) / v.zoom,
+        y: v.oy + (e.clientY - rect.top) / v.zoom
+      };
+      dragRef.current = {
+        kind: "recrop",
+        sx: e.clientX,
+        sy: e.clientY,
+        startOx: v.ox,
+        startOy: v.oy,
+        dx: 0,
+        dy: 0,
+        from: at,
+        to: at
+      };
+      return;
+    }
     // Aligning is single-view only (you need the specimen behind the
     // candidate to judge it); side-by-side just pans the shared view.
     const m = propsRef.current.mode;
@@ -720,6 +835,15 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
       return;
     }
     const v = viewRef.current;
+    if (d.kind === "recrop" && d.from && canvas) {
+      const rect = canvas.getBoundingClientRect();
+      d.to = {
+        x: v.ox + (e.clientX - rect.left) / v.zoom,
+        y: v.oy + (e.clientY - rect.top) / v.zoom
+      };
+      redraw();
+      return;
+    }
     if (d.kind === "pan") {
       viewRef.current = {
         ...v,
@@ -737,6 +861,12 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
     dragRef.current = null;
     if (!d) return;
     canvasRef.current?.releasePointerCapture(e.pointerId);
+    if (d.kind === "recrop") {
+      const box = d.from && d.to ? recropBox(d.from, d.to) : null;
+      if (box && box.width >= 2 && box.height >= 2) propsRef.current.recrop?.onCommit(box);
+      redraw();
+      return;
+    }
     if (d.kind === "scale") {
       if (d.factor && Math.abs(d.factor - 1) > 1e-4) propsRef.current.onScaleCandidate?.(d.factor);
       redraw();
@@ -830,6 +960,8 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
 
   const cursor: CSSProperties["cursor"] = spaceRef.current
     ? "grab"
+    : recrop
+      ? "crosshair"
     : overHandle
       ? `${overHandle}-resize`
     : mode === "sxs"
@@ -864,7 +996,7 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
         onPointerCancel={endDrag}
         onContextMenu={(e) => e.preventDefault()}
       />
-      {mode === "sxs" && (
+      {mode === "sxs" && !recrop && (
         <>
           <PaneHeader side="left" tone="accent">
             {candidate?.cell

@@ -1,5 +1,5 @@
 import { useMemo, useRef } from "react";
-import { useQueries } from "@tanstack/react-query";
+import { useQueries, type QueryClient } from "@tanstack/react-query";
 import type { DieAnnotations } from "shared";
 import { buildLibraryView, libraryDieIds, type CellLibraryView } from "../lib/cellLibrary";
 import { sameFrame } from "../lib/cellDetection";
@@ -70,6 +70,27 @@ export function useCellLibrary(
     () => buildLibraryView(dieId, dies ?? [], own, loaded, loading),
     [dieId, dies, own, loaded, loading]
   );
+}
+
+/**
+ * `view` with every other die's annotations loaded, not just the library's:
+ * a die that left the library can still place one of its types (through
+ * `cellTypeDieId`), and a type-wide edit has to re-place those instances too.
+ */
+export async function withEveryDie(qc: QueryClient, view: CellLibraryView): Promise<CellLibraryView> {
+  const missing = [...view.dies.keys()].filter((id) => id !== view.dieId && !view.annotations.has(id));
+  if (missing.length === 0) return view;
+  const loaded = await Promise.all(
+    missing.map((id) =>
+      qc.fetchQuery({
+        queryKey: annotationKeys.forDie(id),
+        queryFn: ({ signal }) => getAnnotations(id, signal)
+      })
+    )
+  );
+  const annotations = new Map(view.annotations);
+  missing.forEach((id, i) => annotations.set(id, loaded[i]));
+  return { ...view, annotations };
 }
 
 /**

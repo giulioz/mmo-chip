@@ -94,9 +94,16 @@ export function createTilesRouter(config: {
         if (cell) { cropX = cell.x; cropY = cell.y; }
       }
 
-      // Check cache
+      const left = Math.max(0, Math.round(cropX));
+      const top = Math.max(0, Math.round(cropY));
+      const width = Math.min(Math.round(cellType.cropRect.width), record.width - left);
+      const height = Math.min(Math.round(cellType.cropRect.height), record.height - top);
+
+      if (width <= 0 || height <= 0) { response.status(400).json({ error: "Invalid crop region" }); return; }
+
+      // Check cache (keyed by the region too: a recropped type's crop moves)
       const cacheDir = dataPath(config.dataRoot, "dies", safeId(dieId), "cell-crops");
-      const cachePath = path.join(cacheDir, `ct-${cellTypeId}.jpg`);
+      const cachePath = path.join(cacheDir, `ct-${cellTypeId}-${left}_${top}_${width}x${height}.jpg`);
       dataPath(config.dataRoot, path.relative(config.dataRoot, cachePath));
       try {
         await fs.access(cachePath);
@@ -105,13 +112,6 @@ export function createTilesRouter(config: {
       } catch { /* cache miss */ }
 
       const originalPath = record.originalPath;
-
-      const left = Math.max(0, Math.round(cropX));
-      const top = Math.max(0, Math.round(cropY));
-      const width = Math.min(Math.round(cellType.cropRect.width), record.width - left);
-      const height = Math.min(Math.round(cellType.cropRect.height), record.height - top);
-
-      if (width <= 0 || height <= 0) { response.status(400).json({ error: "Invalid crop region" }); return; }
 
       checkRegion(width, height);
       dataPath(config.dataRoot, path.relative(config.dataRoot, cachePath));

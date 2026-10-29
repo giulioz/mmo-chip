@@ -54,6 +54,7 @@ export function annotationsSummary(a: DieAnnotations): string | null {
   const counts: string[] = [];
   if (a.cells.length) counts.push(`${a.cells.length} cells`);
   if (a.nets.length) counts.push(`${a.nets.length} nets`);
+  if (a.blocks?.length) counts.push(`${a.blocks.length} blocks`);
   const vias = a.annotations?.length ?? 0;
   if (vias) counts.push(`${vias} vias`);
   if (a.rois?.length) counts.push(`${a.rois.length} rois`);

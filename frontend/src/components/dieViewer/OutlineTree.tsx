@@ -133,6 +133,7 @@ export function OutlineTree({
     .map((a) => `anno:${a.id}`);
   const viaIdsAll = [...pointViaIds, ...irregularViaIds];
   const pinIdsAll = (annotations.pins ?? []).map((p) => `pin:${p.id}`);
+  const blockIdsAll = (annotations.blocks ?? []).map((b) => `block:${b.id}`);
   const roiIdsAll = (annotations.rois ?? []).map((r) => `roi:${r.id}`);
   const ignoreIdsAll = (annotations.ignores ?? []).map((r) => `ignore:${r.id}`);
   const focus = (ids: string[]) => {
@@ -232,6 +233,35 @@ export function OutlineTree({
                   );
                 })}
             </div>
+          );
+        })}
+
+      <TreeSep />
+
+      {/* Blocks ---------------------------------------------------------- */}
+      <TreeRow
+        expand={isOpen("block") ? "open" : "closed"}
+        label="Blocks"
+        meta={annotations.blocks?.length ?? 0}
+        visibility={visibilityFor("block")}
+        onToggleExpand={() => toggleSection("block")}
+        onSelect={() => toggleSection("block")}
+        onDoubleClick={() => focus(blockIdsAll)}
+      />
+      {isOpen("block") &&
+        annotations.blocks?.map((b) => {
+          const id = `block:${b.id}`;
+          return (
+            <TreeRow
+              key={id}
+              depth={1}
+              icon={Ic.block}
+              label={b.name || b.id}
+              meta={`${b.width}×${b.height}`}
+              selected={selectedIds.has(id)}
+              onSelect={() => select([id])}
+              onDoubleClick={() => focus([id])}
+            />
           );
         })}
 

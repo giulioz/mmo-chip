@@ -355,6 +355,28 @@ function resolve(
         ]
       };
     }
+    case "block": {
+      const b = ann.blocks?.find((x) => x.id === eid);
+      if (!b) return null;
+      return {
+        typeLabel: "Block",
+        displayName: b.name || `Block ${short(b.id)}`,
+        uid: b.id,
+        name: {
+          value: b.name ?? "",
+          onCommit: (name) =>
+            void dispatcher.dispatch({
+              kind: "upsertBlock",
+              block: { ...b, name },
+              prevBlock: b
+            })
+        },
+        rows: [
+          ["position", `(${b.x}, ${b.y})`],
+          ["size", `${b.width}×${b.height}`]
+        ]
+      };
+    }
     case "ignore": {
       const i = ann.ignores?.find((x) => x.id === eid);
       if (!i) return null;

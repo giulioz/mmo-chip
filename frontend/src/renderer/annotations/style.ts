@@ -163,6 +163,7 @@ export const COLOR_IGNORE = "rgba(227, 104, 84, 0.8)";
 export const COLOR_IGNORE_FILL = "rgba(227, 104, 84, 0.12)";
 export const COLOR_ROI = "rgba(245, 214, 138, 0.9)";
 export const COLOR_PIN = "rgba(127, 178, 255, 0.95)";
+export const COLOR_BLOCK = "rgba(214, 140, 255, 0.95)";
 export const COLOR_PIN_FILL = "rgba(127, 178, 255, 0.18)";
 
 // ── Selection accent ─────────────────────────────────────────────────
@@ -193,5 +194,8 @@ export const PICK = {
   net: 2,
   roi: 1,
   ignore: 1,
+  // Blocks only pick on their outline (see `buildBlock`), so they can beat
+  // the cells they enclose there without hiding them everywhere else.
+  block: 1,
   cell: 0
 } as const;

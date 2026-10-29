@@ -4,6 +4,7 @@ import type {
   AnnotationBatchOp,
   AnnotationBatchRequest,
   AnnotationNet,
+  Block,
   Cell,
   CellType,
   DieAnnotations,
@@ -61,6 +62,8 @@ export type AnnotationAction =
   | { kind: "removeIgnore"; ignore: IgnoreRect }
   | { kind: "upsertGuide"; guide: Guide; prevGuide: Guide | null }
   | { kind: "removeGuide"; guide: Guide }
+  | { kind: "upsertBlock"; block: Block; prevBlock: Block | null }
+  | { kind: "removeBlock"; block: Block }
   // One user gesture that touches several nets atomically (cross-net merge,
   // graph-splitting delete). Applied/persisted in order; undone in reverse.
   | { kind: "batch"; actions: AnnotationAction[] }
@@ -137,6 +140,12 @@ export function inverseOf(action: AnnotationAction): AnnotationAction {
         : { kind: "upsertGuide", guide: action.prevGuide, prevGuide: action.guide };
     case "removeGuide":
       return { kind: "upsertGuide", guide: action.guide, prevGuide: null };
+    case "upsertBlock":
+      return action.prevBlock === null
+        ? { kind: "removeBlock", block: action.block }
+        : { kind: "upsertBlock", block: action.prevBlock, prevBlock: action.block };
+    case "removeBlock":
+      return { kind: "upsertBlock", block: action.block, prevBlock: null };
     case "batch":
       return { kind: "batch", actions: [...action.actions].reverse().map(inverseOf) };
     case "onDie":
@@ -232,6 +241,16 @@ export function applyAction(annotations: DieAnnotations, action: AnnotationActio
         ...annotations,
         guides: removeById(annotations.guides ?? [], action.guide.id)
       };
+    case "upsertBlock":
+      return {
+        ...annotations,
+        blocks: upsertById(annotations.blocks ?? [], action.block)
+      };
+    case "removeBlock":
+      return {
+        ...annotations,
+        blocks: removeById(annotations.blocks ?? [], action.block.id)
+      };
     case "batch":
       return action.actions.reduce(applyAction, annotations);
     case "onDie":
@@ -291,6 +310,10 @@ export async function requestAction(
       return apiPut(`/api/dies/${dieId}/guides/${action.guide.id}`, action.guide);
     case "removeGuide":
       return apiDelete(`/api/dies/${dieId}/guides/${action.guide.id}`);
+    case "upsertBlock":
+      return apiPut(`/api/dies/${dieId}/blocks/${action.block.id}`, action.block);
+    case "removeBlock":
+      return apiDelete(`/api/dies/${dieId}/blocks/${action.block.id}`);
     case "batch": {
       // One atomic request: the server applies every sub-action in order
       // under a single write and revision, so a large batch (e.g. turning a
@@ -392,6 +415,12 @@ export function batchOps(action: AnnotationAction): AnnotationBatchOp[] {
         return;
       case "removeGuide":
         ops.push({ op: "remove", collection: "guides", id: a.guide.id });
+        return;
+      case "upsertBlock":
+        ops.push({ op: "upsert", collection: "blocks", item: a.block });
+        return;
+      case "removeBlock":
+        ops.push({ op: "remove", collection: "blocks", id: a.block.id });
         return;
     }
   };

@@ -1,4 +1,5 @@
 import type {
+  Block,
   Cell,
   CellType,
   DieAnnotations,
@@ -23,6 +24,7 @@ import {
   CELL_FILL_ALPHA,
   CELL_OUTLINE_ALPHA,
   CELL_OUTLINE_PX,
+  COLOR_BLOCK,
   COLOR_IGNORE,
   COLOR_IGNORE_FILL,
   COLOR_PIN,
@@ -123,6 +125,7 @@ export function populateAnnotationLayer(
   for (const r of annotations.rois ?? []) layer.add(buildRoiRect(r));
   for (const r of annotations.ignores ?? []) layer.add(buildIgnore(r));
   for (const p of annotations.pins ?? []) layer.add(buildPin(p));
+  for (const b of annotations.blocks ?? []) layer.add(buildBlock(b));
 }
 
 // ── Cells ────────────────────────────────────────────────────────────
@@ -347,6 +350,62 @@ export function buildRoiRect(roi: ROIRectangle): Annotation {
       ctx.setLineDash([dash, dash * 0.6]);
       ctx.strokeRect(roi.x, roi.y, roi.width, roi.height);
       ctx.setLineDash([]);
+    }
+  };
+}
+
+// ── Blocks ───────────────────────────────────────────────────────────
+
+/** Block outline width in CSS px (thicker than cells: blocks enclose them). */
+const BLOCK_OUTLINE_PX = 2;
+const BLOCK_LABEL_PX = 12;
+
+/**
+ * A named functional-block outline. Unfilled, so the cells inside stay
+ * readable, and picked only on (or near) its border: a click or marquee
+ * inside the block still reaches the cells it encloses.
+ */
+export function buildBlock(b: Block): Annotation {
+  const id = `block:${b.id}`;
+  const bbox = { x: b.x, y: b.y, width: b.width, height: b.height };
+  const onOutline = (p: { x: number; y: number }, tol: number) =>
+    pointInRect(p, { x: b.x - tol, y: b.y - tol, width: b.width + 2 * tol, height: b.height + 2 * tol }) &&
+    !pointInRect(p, { x: b.x + tol, y: b.y + tol, width: b.width - 2 * tol, height: b.height - 2 * tol });
+  return {
+    id,
+    kind: "block",
+    pickPriority: PICK.block,
+    bbox,
+    draw(ctx, bounds, state) {
+      const color = state.selected ? SELECT_COLOR : COLOR_BLOCK;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = (state.selected ? BLOCK_OUTLINE_PX + 1 : BLOCK_OUTLINE_PX) / bounds.zoom;
+      ctx.strokeRect(b.x, b.y, b.width, b.height);
+
+      // Name in the top-left corner, at a constant on-screen size; skipped
+      // while the block is too small on screen to hold it.
+      if (!b.name) return;
+      const pad = 4 / bounds.zoom;
+      const fontPx = BLOCK_LABEL_PX / bounds.zoom;
+      if (b.height < fontPx + 2 * pad) return;
+      ctx.font = `600 ${fontPx}px ui-sans-serif, system-ui, sans-serif`;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.lineWidth = 3 / bounds.zoom;
+      ctx.strokeStyle = "rgba(0, 0, 0, 0.7)";
+      ctx.strokeText(b.name, b.x + pad, b.y + pad);
+      ctx.fillStyle = color;
+      ctx.fillText(b.name, b.x + pad, b.y + pad);
+    },
+    hitTest(p, tol) {
+      return onOutline(p, tol) ? id : null;
+    },
+    intersectsRect(r) {
+      // Selected by a marquee that reaches its border, not one drawn wholly
+      // inside it (that one is after the enclosed cells).
+      const inside =
+        r.x > b.x && r.y > b.y && r.x + r.width < b.x + b.width && r.y + r.height < b.y + b.height;
+      return !inside;
     }
   };
 }

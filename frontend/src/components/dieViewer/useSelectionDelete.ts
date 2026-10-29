@@ -75,6 +75,10 @@ export function useSelectionDelete(opts: {
           const pin = a?.pins?.find((v) => v.id === eid);
           return pin ? { kind: "removePin", pin } : null;
         }
+        case "block": {
+          const block = a?.blocks?.find((v) => v.id === eid);
+          return block ? { kind: "removeBlock", block } : null;
+        }
         case "guide": {
           const guide = a?.guides?.find((v) => v.id === eid);
           return guide ? { kind: "removeGuide", guide } : null;

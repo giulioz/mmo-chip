@@ -1,6 +1,7 @@
 export const ANNOTATION_KIND_VALUES = [
   "net",
   "cell",
+  "block",
   "via",
   "roi",
   "pin",

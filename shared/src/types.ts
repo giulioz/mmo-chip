@@ -255,6 +255,18 @@ export type Guide =
       y2: number;
     };
 
+/** A named bounding box around a larger functional unit recognised on the
+ *  die (a multiplier, a RAM block, the flip-flops of a multi-bit register…).
+ *  RE aid only: carries no cell type, layers or ML meaning. */
+export interface Block {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface IOPin {
   id: string;
   x: number;
@@ -386,6 +398,8 @@ export interface DieAnnotations {
   ignores?: IgnoreRect[];
   /** Cell-placement guides (RE aid, not ML). Absent ⇒ none. */
   guides?: Guide[];
+  /** Named functional-block outlines (RE aid, not ML). Absent ⇒ none. */
+  blocks?: Block[];
 }
 
 /** The whole-entity collections of `DieAnnotations`, by item type. */
@@ -399,6 +413,7 @@ interface AnnotationCollectionItems {
   rois: ROIRectangle;
   ignores: IgnoreRect;
   guides: Guide;
+  blocks: Block;
 }
 
 export type AnnotationCollection = keyof AnnotationCollectionItems;

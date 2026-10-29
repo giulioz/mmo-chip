@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import type { Rect } from "../../lib/geometry";
 import type { DieOrientOp } from "../../lib/mergeCells";
 
 /**
@@ -28,6 +29,11 @@ export interface DieContextMenuState {
   cellIds: string[];
   /** Header for the cell items ("Cell · NAND2", "3 cells"). */
   cellLabel: string;
+  /** Bounds of what "Make block around…" would enclose (the selection, else
+   *  the cell under the cursor). Null ⇒ nothing to enclose; item hidden. */
+  blockRect: Rect | null;
+  /** What `blockRect` encloses, for the item label. */
+  blockLabel: "selection" | "cell";
 }
 
 interface Props {
@@ -37,18 +43,22 @@ interface Props {
   onStartMultiWire: () => void;
   /** Flip / turn `menu.cellIds` in place, as they lie on the die. */
   onOrientCells: (op: DieOrientOp) => void;
+  /** Create a named block outline around `menu.blockRect`. */
+  onMakeBlock: () => void;
 }
 
 /** Right-click menu on the die-viewer canvas. On a placed cell: flip it or
  *  turn it a quarter turn about its centre. Always: start a single wire from
  *  the cursor, and start a multi-wire bus from the current selection's
- *  via/vertex points (enabled with ≥2 sources). */
+ *  via/vertex points (enabled with ≥2 sources). With a selection (or on a
+ *  cell): make a named block around it. */
 export function DieContextMenu({
   menu,
   onClose,
   onStartWire,
   onStartMultiWire,
-  onOrientCells
+  onOrientCells,
+  onMakeBlock
 }: Props) {
   const ref = useRef<HTMLDivElement | null>(null);
 
@@ -70,7 +80,10 @@ export function DieContextMenu({
   const hasCells = menu.cellIds.length > 0;
   // Clamp inside the viewport — same simple guard the other context menus use.
   const x = Math.min(menu.screenX, window.innerWidth - 240);
-  const y = Math.min(menu.screenY, window.innerHeight - (hasCells ? 250 : 120));
+  const y = Math.min(
+    menu.screenY,
+    window.innerHeight - (hasCells ? 250 : 120) - (menu.blockRect ? 40 : 0)
+  );
 
   const canMulti = menu.multiPointCount >= 2;
   const orient = (op: DieOrientOp) => () => {
@@ -130,6 +143,20 @@ export function DieContextMenu({
           ? `Start multi-wire from ${menu.multiPointCount} points`
           : "Start multi-wire from selection"}
       </button>
+      {menu.blockRect && (
+        <>
+          <div className="menu-sep" />
+          <button
+            className="menu-item"
+            onClick={() => {
+              onMakeBlock();
+              onClose();
+            }}
+          >
+            Make block around {menu.blockLabel}
+          </button>
+        </>
+      )}
     </div>
   );
 }

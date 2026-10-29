@@ -1,6 +1,7 @@
 import { Fragment, type ReactNode } from "react";
 import { Ic } from "../../icons";
 import { useLiveValue } from "../../lib/liveValue";
+import type { BlockTool } from "./useBlockTool";
 import type { LibraryCellTool } from "./useLibraryCellTool";
 import { useDieViewerStore, type ToolKind } from "../../state/dieViewer";
 import { usePreferences } from "../../state/preferences";
@@ -42,6 +43,11 @@ const TOOL_GROUPS: ToolGroup[] = [
     label: "cells",
     items: [
       { kind: "addCell", icon: Ic.cellRect, label: "Draw cell rectangle" },
+      {
+        kind: "addBlock",
+        icon: Ic.block,
+        label: "Draw block — a named outline around a multiplier, RAM, register…"
+      },
       { kind: "cellGuideLine", icon: Ic.gridLine, label: "Draw cell-grid guide line" },
       { kind: "cellGuideSeg", icon: Ic.gridSeg, label: "Draw cell-grid guide segment" },
       { kind: "ioPoint", icon: Ic.ioPoint, label: "Place I/O point" },
@@ -78,7 +84,8 @@ export function DieToolbar({
   activeTool,
   setActiveTool,
   multiWireHint,
-  libraryCell
+  libraryCell,
+  block
 }: {
   activeTool: ToolKind;
   setActiveTool: (tool: ToolKind) => void;
@@ -87,8 +94,10 @@ export function DieToolbar({
   multiWireHint?: string;
   /** The "Place library cell" tool's state and controls. */
   libraryCell?: LibraryCellTool;
+  /** The "Draw block" tool (its name field commits the draft on Enter). */
+  block?: BlockTool;
 }) {
-  const options = toolOptions(activeTool, multiWireHint, libraryCell);
+  const options = toolOptions(activeTool, multiWireHint, libraryCell, block);
   return (
     <>
       {TOOL_GROUPS.map((group, gi) => (
@@ -142,12 +151,14 @@ export function DieToolbar({
 function toolOptions(
   tool: ToolKind,
   multiWireHint?: string,
-  libraryCell?: LibraryCellTool
+  libraryCell?: LibraryCellTool,
+  block?: BlockTool
 ): ReactNode {
   if (tool === "libraryCell" && libraryCell) return <LibraryCellOptions tool={libraryCell} />;
   if (tool === "wire") return <WireOptions />;
   if (tool === "multiWire") return <WireOptions hint={multiWireHint} />;
   if (tool === "addCell") return <CellOptions />;
+  if (tool === "addBlock" && block) return <BlockOptions tool={block} />;
   if (tool === "roi") return <RoiOptions />;
   if (tool === "cellGuideLine") return <GuideLineOptions />;
   // others (incl. cellGuideSeg) have no options.
@@ -356,6 +367,37 @@ function WireOptions({ hint }: { hint?: string }) {
           {hint}
         </span>
       )}
+    </>
+  );
+}
+
+/** Name for the next block (Enter here commits the drawn rect), plus the
+ *  same guide snapping the cell tool has. */
+function BlockOptions({ tool }: { tool: BlockTool }) {
+  const name = useDieViewerStore((s) => s.blockName);
+  const setName = useDieViewerStore((s) => s.setBlockName);
+  return (
+    <>
+      <span className="u" style={{ fontSize: 10 }}>
+        Name
+      </span>
+      <label className="input" style={{ width: 180 }}>
+        <input
+          value={name}
+          placeholder="e.g. MUL16, ROM, R0[7:0]"
+          spellCheck={false}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              tool.commitBlock();
+            } else if (e.key === "Escape") {
+              e.currentTarget.blur();
+            }
+          }}
+        />
+      </label>
+      <CellOptions />
     </>
   );
 }

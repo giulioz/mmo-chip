@@ -10,6 +10,7 @@ import {
 } from "../../lib/geometry";
 import {
   buildAnnotation,
+  buildBlock,
   buildIgnore,
   buildRoiRect
 } from "../../renderer/annotations/dieAnnotations";
@@ -133,6 +134,21 @@ export function resolveEditable(
         kind: "upsertIgnore",
         ignore: { ...i0, ...rRect(r) },
         prevIgnore: i0
+      })
+    };
+  }
+
+  if (prefix === "block") {
+    const b0 = ann.blocks?.find((x) => x.id === eid);
+    if (!b0) return null;
+    return {
+      kind: "rect",
+      rect: { x: b0.x, y: b0.y, width: b0.width, height: b0.height },
+      rebuild: (r) => buildBlock({ ...b0, ...r }),
+      toAction: (r) => ({
+        kind: "upsertBlock",
+        block: { ...b0, ...rRect(r) },
+        prevBlock: b0
       })
     };
   }

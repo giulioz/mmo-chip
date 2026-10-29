@@ -65,6 +65,7 @@ import {
   type WireSnap
 } from "../components/dieViewer/useWireTool";
 import { useCellTool } from "../components/dieViewer/useCellTool";
+import { useBlockTool } from "../components/dieViewer/useBlockTool";
 import { useLibraryCellTool } from "../components/dieViewer/useLibraryCellTool";
 import { LibraryCellOverlay } from "../components/dieViewer/LibraryCellOverlay";
 import {
@@ -195,6 +196,7 @@ function DieViewer({ dieId }: { dieId: string }) {
   );
   const marqueeLive = useMemo(() => createLiveValue<Rect | null>(null), []);
   const cellRectLive = useMemo(() => createLiveValue<Rect | null>(null), []);
+  const blockRectLive = useMemo(() => createLiveValue<Rect | null>(null), []);
   const shapeRectLive = useMemo(() => createLiveValue<Rect | null>(null), []);
   const wirePreviewLive = useMemo(
     () => createLiveValue<WirePreview | null>(null),
@@ -719,6 +721,14 @@ function DieViewer({ dieId }: { dieId: string }) {
     setActiveTool
   });
 
+  const block = useBlockTool({
+    dispatcher,
+    annotations,
+    blockRectLive,
+    activeTool,
+    setActiveTool
+  });
+
   const libraryCell = useLibraryCellTool({
     dieId,
     library,
@@ -1127,13 +1137,15 @@ function DieViewer({ dieId }: { dieId: string }) {
       // scale it; anywhere else pans (and a click moves the template there).
       if (tool === "libraryCell") return libraryCell.pointerDown(e);
 
-      // Add-cell: rubber-band a rectangle. The rect lives in `cellRectLive`
-      // (no page re-render while dragging) and stays as an *editable draft*
-      // until the user presses Enter to commit (or Escape to discard) — see
-      // useCellTool. While a draft exists, dragging a corner resizes it and
-      // dragging the body moves it; a drag started outside the draft starts
-      // a fresh rect (replacing the previous draft).
-      if (tool === "addCell") {
+      // Add-cell / add-block: rubber-band a rectangle. The rect lives in
+      // `cellRectLive` / `blockRectLive` (no page re-render while dragging)
+      // and stays as an *editable draft* until the user presses Enter to
+      // commit (or Escape to discard) — see useCellTool / useBlockTool. While
+      // a draft exists, dragging a corner resizes it and dragging the body
+      // moves it; a drag started outside the draft starts a fresh rect
+      // (replacing the previous draft).
+      if (tool === "addCell" || tool === "addBlock") {
+        const rectLive = tool === "addCell" ? cellRectLive : blockRectLive;
         const vp = viewportLive.get();
         const tolWorld = vp ? 32 / vp.zoom : 32;
         const snap = (r: Rect): Rect => {
@@ -1148,7 +1160,7 @@ function DieViewer({ dieId }: { dieId: string }) {
           return r;
         };
 
-        const pending = cellRectLive.get();
+        const pending = rectLive.get();
         if (pending) {
           const draft = normalizeRect(pending);
           // Corner-resize: nearest corner moves with the cursor, opposite
@@ -1157,19 +1169,19 @@ function DieViewer({ dieId }: { dieId: string }) {
           if (corner != null) {
             const fixed = rectCorners(draft)[(corner + 2) % 4];
             const setFromCorner = (wp: Point) =>
-              cellRectLive.set(snap(rectFromPoints(fixed, wp)));
+              rectLive.set(snap(rectFromPoints(fixed, wp)));
             return {
               onDragStart: ({ worldPoint }) => setFromCorner(worldPoint),
               onDragMove: ({ worldPoint }) => setFromCorner(worldPoint),
               onPointerUp: ({ worldPoint }) => setFromCorner(worldPoint),
-              onCancel: () => cellRectLive.set(draft)
+              onCancel: () => rectLive.set(draft)
             };
           }
           // Body-move: translate the rect by the pointer delta.
           if (pointInRect(e.worldPoint, draft)) {
             const start = e.worldPoint;
             const moveTo = (wp: Point) =>
-              cellRectLive.set({
+              rectLive.set({
                 x: draft.x + (wp.x - start.x),
                 y: draft.y + (wp.y - start.y),
                 width: draft.width,
@@ -1179,7 +1191,7 @@ function DieViewer({ dieId }: { dieId: string }) {
               onDragStart: ({ worldPoint }) => moveTo(worldPoint),
               onDragMove: ({ worldPoint }) => moveTo(worldPoint),
               onPointerUp: ({ worldPoint }) => moveTo(worldPoint),
-              onCancel: () => cellRectLive.set(draft)
+              onCancel: () => rectLive.set(draft)
             };
           }
         }
@@ -1188,15 +1200,15 @@ function DieViewer({ dieId }: { dieId: string }) {
         // commit — the rect stays as a draft for Enter / further editing.
         const origin = { x: e.worldPoint.x, y: e.worldPoint.y };
         const setRect = (worldPoint: { x: number; y: number }) =>
-          cellRectLive.set(snap(rectFromPoints(origin, worldPoint)));
+          rectLive.set(snap(rectFromPoints(origin, worldPoint)));
         const drawRect: DragHandler = {
           onDragStart: ({ worldPoint }) => setRect(worldPoint),
           onDragMove: ({ worldPoint }) => setRect(worldPoint),
           onPointerUp: ({ dragged, worldPoint }) => {
-            if (!dragged) return; // a plain click makes no cell
+            if (!dragged) return; // a plain click makes no rect
             setRect(worldPoint);
           },
-          onCancel: () => cellRectLive.set(null)
+          onCancel: () => rectLive.set(null)
         };
         return drawRect;
       }
@@ -1622,6 +1634,7 @@ function DieViewer({ dieId }: { dieId: string }) {
       wire,
       cell,
       cellRectLive,
+      blockRectLive,
       shapeRectLive,
       editPreviewLive,
       guideDragLive,
@@ -1864,6 +1877,11 @@ function DieViewer({ dieId }: { dieId: string }) {
           cellIds.length > 1 ? `${cellIds.length} cells` : `Cell${typeName ? ` · ${typeName}` : ""}`;
       }
 
+      // Bounds for "Make block around…": the selection, else the cell under
+      // the cursor.
+      const blockIds = sel.size > 0 ? [...sel] : cellIds.map((id) => `cell:${id}`);
+      const blockRect = annotationLayer?.unionBBox(blockIds) ?? null;
+
       const picks = extractAnchorPointsFromSelection(sel);
       setContextMenu({
         screenX: event.clientX,
@@ -1873,7 +1891,9 @@ function DieViewer({ dieId }: { dieId: string }) {
         hitLabel,
         multiPointCount: picks.length,
         cellIds,
-        cellLabel
+        cellLabel,
+        blockRect,
+        blockLabel: sel.size > 0 ? "selection" : "cell"
       });
     },
     [annotationLayer, mlViasLayer, wire, cell, extractAnchorPointsFromSelection]
@@ -2062,6 +2082,7 @@ function DieViewer({ dieId }: { dieId: string }) {
           setActiveTool={setActiveTool}
           multiWireHint={multiWireHint}
           libraryCell={libraryCell}
+          block={block}
         />
       </SubBar>
       <main
@@ -2143,6 +2164,12 @@ function DieViewer({ dieId }: { dieId: string }) {
             handles
           />
           <RectDraftOverlay
+            rectStore={blockRectLive}
+            viewportStore={viewportLive}
+            color="#d68cff"
+            handles
+          />
+          <RectDraftOverlay
             rectStore={shapeRectLive}
             viewportStore={viewportLive}
             color={
@@ -2201,6 +2228,9 @@ function DieViewer({ dieId }: { dieId: string }) {
           activeTool === "addCell"
             ? "add cell — drag to draw · corners resize · Enter to add · Esc to cancel"
             : null,
+          activeTool === "addBlock"
+            ? "add block — drag to draw · corners resize · name it in the toolbar · Enter to add · Esc to cancel"
+            : null,
           activeTool === "libraryCell"
             ? libraryCell.hasDraft
               ? "place library cell — drag to move · corners scale · click to move here · Enter to accept · Esc to cancel"
@@ -2223,6 +2253,9 @@ function DieViewer({ dieId }: { dieId: string }) {
             )
           }
           onOrientCells={(op) => orientCells(contextMenu.cellIds, op)}
+          onMakeBlock={() => {
+            if (contextMenu.blockRect) block.createBlock(contextMenu.blockRect);
+          }}
         />
       )}
     </AppShell>

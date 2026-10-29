@@ -6,7 +6,7 @@ import path from "node:path";
 import test, { afterEach } from "node:test";
 import sharp from "sharp";
 import request from "../testRequest.test.js";
-import type { AnnotationBatchOp, Cell, CellType, DieAnnotations, Guide } from "shared";
+import type { AnnotationBatchOp, Block, Cell, CellType, DieAnnotations, Guide } from "shared";
 import { createApp } from "../app.js";
 import { ensureDataStore } from "../store.js";
 import type { AnnotationBroadcaster } from "../ws.js";
@@ -102,12 +102,14 @@ test("a batch lands as one write and one revision, applied in order", async () =
   };
   await h.write(before);
   const guide: Guide = { id: "g1", kind: "line", axis: "x", pos: 12 };
+  const block: Block = { id: "k1", name: "ALU", x: 0, y: 0, width: 120, height: 17 };
   const ops: AnnotationBatchOp[] = [
     { op: "upsert", collection: "cellTypes", item: { ...type("tA", 17, 30), name: "NAND2" } },
     { op: "upsert", collection: "cells", item: cell("a", 6.5, { rotation: 270 }) },
     { op: "remove", collection: "cells", id: "b" },
     { op: "upsert", collection: "cells", item: cell("d", 120) },
     { op: "upsert", collection: "guides", item: guide },
+    { op: "upsert", collection: "blocks", item: block },
     { op: "upsert", collection: "cells", item: cell("e", 160) },
     { op: "remove", collection: "cells", id: "e" }
   ];
@@ -120,6 +122,7 @@ test("a batch lands as one write and one revision, applied in order", async () =
   assert.deepEqual(after.cellTypes, [{ ...type("tA", 17, 30), name: "NAND2" }]);
   assert.deepEqual(after.cells, [cell("a", 6.5, { rotation: 270 }), cell("c", 80), cell("d", 120)]);
   assert.deepEqual(after.guides, [guide]);
+  assert.deepEqual(after.blocks, [block]);
   assert.deepEqual(h.changes, [[h.dieId, 6]], "one change notification");
 });
 

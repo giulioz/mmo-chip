@@ -60,6 +60,14 @@ export const Ic = {
       <path d="M8 5.2v5.6M5.2 8h5.6" />
     </>
   ),
+  // Named block outline: a frame with a label tab in its corner.
+  block: Icon(
+    <>
+      <rect x="2" y="2.5" width="12" height="11" />
+      <path d="M2 6h5.5V2.5" />
+      <path d="M8 9.5h3.5M8 11.5h2" opacity=".55" />
+    </>
+  ),
   // ── Die-viewer toolbar (representative tool glyphs) ──
   pan: Icon(
     <>

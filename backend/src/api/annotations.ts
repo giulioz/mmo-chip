@@ -12,6 +12,7 @@ import type {
   AnnotationNet,
   AnnotationNetEdge,
   AnnotationNetNode,
+  Block,
   Cell,
   CellLayers,
   CellType,
@@ -115,6 +116,7 @@ export function createAnnotationsRouter(config: AnnotationsRouterConfig) {
   registerOptionalCollectionRoutes<ROIRectangle>(router, config, notify, "rois", "rois");
   registerOptionalCollectionRoutes<IgnoreRect>(router, config, notify, "ignores", "ignores");
   registerOptionalCollectionRoutes<Guide>(router, config, notify, "guides", "guides");
+  registerOptionalCollectionRoutes<Block>(router, config, notify, "blocks", "blocks");
 
   // ─── Net sub-entities ─────────────────────────────────────────────
 
@@ -331,7 +333,8 @@ const BATCH_COLLECTIONS: ReadonlySet<string> = new Set<AnnotationCollection>([
   "annotations",
   "rois",
   "ignores",
-  "guides"
+  "guides",
+  "blocks"
 ]);
 
 /** Validate a batch body's `ops` up front (so a bad op writes nothing);
@@ -403,7 +406,7 @@ function registerOptionalCollectionRoutes<T extends { id: string }>(
   config: { dataRoot: string },
   notify: (dieId: string, rev: number) => void,
   pathName: string,
-  field: "pins" | "annotations" | "rois" | "ignores" | "guides"
+  field: "pins" | "annotations" | "rois" | "ignores" | "guides" | "blocks"
 ) {
   router.put(`/api/dies/:dieId/${pathName}/:id`, async (request, response, next) => {
     const { dieId, id } = request.params;

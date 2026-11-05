@@ -162,6 +162,8 @@ function Merge({ dieId }: { dieId: string }) {
   const setShowAnno = usePreferences((s) => s.setMergeShowAnno);
   const showMlVias = usePreferences((s) => s.mergeShowMlVias);
   const setShowMlVias = usePreferences((s) => s.setMergeShowMlVias);
+  const showDieContext = usePreferences((s) => s.mergeShowDieContext);
+  const setShowDieContext = usePreferences((s) => s.setMergeShowDieContext);
 
   const specimenTypeId = useMergeStore((s) => s.specimenTypeId);
   const specimenCellId = useMergeStore((s) => s.specimenCellId);
@@ -1159,6 +1161,17 @@ function Merge({ dieId }: { dieId: string }) {
         </label>
         <label
           className="check"
+          title="Show the die around the cells, dimmed, beyond their boxes"
+        >
+          <input
+            type="checkbox"
+            checked={showDieContext}
+            onChange={(e) => setShowDieContext(e.target.checked)}
+          />
+          Die context
+        </label>
+        <label
+          className="check"
           title="Overlay ML-detected vias on each cell — helps eyeball the alignment"
         >
           <input
@@ -1223,6 +1236,7 @@ function Merge({ dieId }: { dieId: string }) {
             onAlignCanonical={onAlignCanonical}
             onScaleCandidate={onScaleCandidate}
             recrop={recropView}
+            showDieContext={showDieContext}
           />
           <Filmstrip
             die={die ?? null}

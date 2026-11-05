@@ -55,6 +55,9 @@ interface PreferencesState {
   /** Overlay ML via predictions on each merge-cells crop (helps eyeball
    *  align by comparing detected via positions specimen-vs-candidate). */
   mergeShowMlVias: boolean;
+  /** Merge cells: draw the die around the cell(s) compared (dimmed), not
+   *  just the crops. */
+  mergeShowDieContext: boolean;
   /** Last viewport per die (pan/zoom). Written throttled from the page so
    *  reload restores the user's framing. */
   savedViewports: Record<string, Viewport>;
@@ -132,6 +135,7 @@ interface PreferencesActions {
   setMergeOpacity: (opacity: number) => void;
   setMergeShowAnno: (show: boolean) => void;
   setMergeShowMlVias: (show: boolean) => void;
+  setMergeShowDieContext: (show: boolean) => void;
   setRoiClasses: (classes: AnnotationClass[]) => void;
   setReLayerHidden: (key: string, hidden: boolean) => void;
   setReShowSurroundingDie: (show: boolean) => void;
@@ -190,6 +194,7 @@ export const usePreferences = create<PreferencesState & PreferencesActions>()(
         mergeOpacity: 0.5,
         mergeShowAnno: true,
         mergeShowMlVias: false,
+        mergeShowDieContext: false,
         savedViewports: {},
         reLayerHidden: {},
         reShowSurroundingDie: false,
@@ -233,6 +238,7 @@ export const usePreferences = create<PreferencesState & PreferencesActions>()(
           set({ mergeOpacity: Math.min(1, Math.max(0, opacity)) }),
         setMergeShowAnno: (show) => set({ mergeShowAnno: show }),
         setMergeShowMlVias: (show) => set({ mergeShowMlVias: show }),
+        setMergeShowDieContext: (show) => set({ mergeShowDieContext: show }),
         setRoiClasses: (classes) => set({ roiClasses: classes }),
         setReLayerHidden: (key, hidden) =>
           set((state) => {
@@ -338,6 +344,7 @@ export const usePreferences = create<PreferencesState & PreferencesActions>()(
           mergeOpacity: state.mergeOpacity,
           mergeShowAnno: state.mergeShowAnno,
           mergeShowMlVias: state.mergeShowMlVias,
+          mergeShowDieContext: state.mergeShowDieContext,
           savedViewports: state.savedViewports,
           reLayerHidden: state.reLayerHidden,
           reShowSurroundingDie: state.reShowSurroundingDie,

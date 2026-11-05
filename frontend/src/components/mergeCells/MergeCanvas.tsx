@@ -97,6 +97,10 @@ interface Props {
   onScaleCandidate?: (factor: number) => void;
   /** Set while the recrop tool is on: replaces the comparison view. */
   recrop?: RecropView | null;
+  /** Draw the die around the instance shown (dimmed): the specimen's in
+   *  overlay / difference / specimen, the candidate's in candidate, each
+   *  pane's own in side-by-side. */
+  showDieContext?: boolean;
 }
 
 const GAP = 24; // world-unit gap between the two boxes in side-by-side
@@ -183,7 +187,8 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
     onAlign,
     onAlignCanonical,
     onScaleCandidate,
-    recrop = null
+    recrop = null,
+    showDieContext = false
   },
   ref
 ) {
@@ -541,6 +546,40 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
       ctx.restore();
     };
 
+    /** The die around an instance, in its canonical frame placed at
+     *  (originX, originY), dimmed outside its box. `visible` is the world
+     *  rect on screen; `slot` keeps one composed view per use. */
+    const drawDieContext = (
+      cell: Cell,
+      box: { w: number; h: number },
+      originX: number,
+      originY: number,
+      visible: Rect,
+      zoom: number,
+      slot: string
+    ) => {
+      const local = { ...visible, x: visible.x - originX, y: visible.y - originY };
+      const region = die
+        ? dieView(die, canonicalRectOnDie(cell, box.w, box.h, local), zoom * dpr, redraw, slot)
+        : null;
+      ctx.save();
+      ctx.translate(originX, originY);
+      ctx.imageSmoothingEnabled = zoom < 3;
+      if (region) {
+        ctx.save();
+        enterCellDieFrame(ctx, cell, box.w, box.h);
+        const r = region.rect;
+        ctx.drawImage(region.canvas, r.x, r.y, r.width, r.height);
+        ctx.restore();
+      }
+      ctx.fillStyle = "rgba(0,0,0,0.45)";
+      ctx.beginPath();
+      ctx.rect(local.x, local.y, local.width, local.height);
+      ctx.rect(0, 0, box.w, box.h);
+      ctx.fill("evenodd");
+      ctx.restore();
+    };
+
     const drawCell = (
       view: CellView,
       box: { w: number; h: number },
@@ -622,22 +661,7 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
       const v = viewRef.current;
       setWorld(v, 0);
       const visible = { x: v.ox, y: v.oy, width: cw / v.zoom, height: ch / v.zoom };
-      const region = die
-        ? dieView(die, canonicalRectOnDie(cell, box.w, box.h, visible), v.zoom * dpr, redraw, "merge-recrop")
-        : null;
-      ctx.imageSmoothingEnabled = v.zoom < 3;
-      if (region) {
-        ctx.save();
-        enterCellDieFrame(ctx, cell, box.w, box.h);
-        const r = region.rect;
-        ctx.drawImage(region.canvas, r.x, r.y, r.width, r.height);
-        ctx.restore();
-      }
-      ctx.fillStyle = "rgba(0,0,0,0.45)";
-      ctx.beginPath();
-      ctx.rect(visible.x, visible.y, visible.width, visible.height);
-      ctx.rect(0, 0, box.w, box.h);
-      ctx.fill("evenodd");
+      drawDieContext(cell, box, 0, 0, visible, v.zoom, "merge-recrop");
       if (showAnno) drawCellLayers(ctx, rv.cellType?.layers, mkBounds(v.zoom), { outline: false });
       ctx.strokeStyle = "rgba(245,214,138,0.7)";
       ctx.lineWidth = 1 / v.zoom;
@@ -673,7 +697,8 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
         pw: number,
         view: View,
         cell: CellView | null,
-        box: { w: number; h: number } | null
+        box: { w: number; h: number } | null,
+        slot: string
       ) => {
         ctx.save();
         ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -686,6 +711,10 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
         );
         ctx.clip();
         setWorld(view, pxX);
+        if (showDieContext && cell?.cell && !cell.align && box) {
+          const visible = { x: view.ox, y: view.oy, width: pw / view.zoom, height: ch / view.zoom };
+          drawDieContext(cell.cell, box, 0, 0, visible, view.zoom, slot);
+        }
         if (cell && box)
           drawCell(cell, box, 0, 0, 1, { dx: 0, dy: 0 }, view.zoom);
         ctx.restore();
@@ -693,8 +722,8 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
       // Same shared view in both panes → linked pan/zoom.
       // Candidate on the left, target/specimen on the right.
       const v = viewRef.current;
-      drawPane(0, half, v, candidate, cd);
-      drawPane(half, cw - half, v, specimen, sp);
+      drawPane(0, half, v, candidate, cd, "merge-ctx-candidate");
+      drawPane(half, cw - half, v, specimen, sp, "merge-ctx-specimen");
     } else {
       // Stacked / single layout. overlay+diff draw both (diff with the
       // "difference" blend — black where they agree, bright where they
@@ -725,6 +754,24 @@ export const MergeCanvas = forwardRef<MergeCanvasHandle, Props>(function MergeCa
       const ext = contentExtent(mode, sp, cd);
       const showSpecimen = mode !== "candidate";
       const showCandidate = mode !== "specimen";
+      // The die around whichever instance is the backdrop: the specimen's,
+      // or in candidate-only mode the candidate's (moving with a drag).
+      if (showDieContext) {
+        const visible = { x: v.ox, y: v.oy, width: cw / v.zoom, height: ch / v.zoom };
+        if (showSpecimen && sp && specimen?.cell && !specimen.align) {
+          drawDieContext(specimen.cell, sp, (ext.w - sp.w) / 2, (ext.h - sp.h) / 2, visible, v.zoom, "merge-ctx-specimen");
+        } else if (!showSpecimen && cd && candidate?.cell && !candidate.align) {
+          drawDieContext(
+            candidate.cell,
+            cd,
+            (ext.w - cd.w) / 2 + live.dx,
+            (ext.h - cd.h) / 2 + live.dy,
+            visible,
+            v.zoom,
+            "merge-ctx-candidate"
+          );
+        }
+      }
       if (showSpecimen && sp && specimen)
         drawCell(
           specimen,

@@ -230,6 +230,12 @@ export function useCanvasGestures({
           originY: worldY - cssY / clamped,
           zoom: clamped
         });
+      } else if (e.shiftKey) {
+        setViewport({
+          originX: vp.originX + e.deltaY / vp.zoom,
+          originY: vp.originY + e.deltaX / vp.zoom,
+          zoom: vp.zoom
+        });
       } else {
         setViewport({
           originX: vp.originX + e.deltaX / vp.zoom,
